@@ -1,21 +1,9 @@
 #!/platform/python/bin/python
 
-# DIRPY - the Dymamic Image Resizing Program (Yay!)
-
-# v0.1 		: Intial version 
-# 2014-09-27	: Eric Schwimmer
-
 __version__ = "0.1"
 
 import os, sys, datetime, ConfigParser, argparse, logging, signal
 import Queue, multiprocessing.pool, socket, cStringIO, urllib, urllib2
-
-# Gracefully exit if PIL (our one non-standard Python module) isn't installed
-try:
-    from PIL import Image
-except:
-    print ("Missing the PIL module; please consult the README.md file \n" +
-        "for instructions on how to install PIL")
 
 # Our dirpy worker thread.  This is where all the heavy lifting is done #######
 def dirpyWorker(connQueue): ###################################################
@@ -77,12 +65,14 @@ def dirpyWorker(connQueue): ###################################################
 
             # Make sure we have a (valid) command
             if "cmd" not in query:
-                httpError(conn, 400, "Missing dirpy command")
+                httpError(conn, 400, "Missing Dirpy command")
+                logger.error("Missing Dirpy command")
                 continue
 
             cmd = query["cmd"]
             if cmd not in ("shrink","grow","resize","degrade"):
-                httpError(conn, 400, "Invalid dirpy command: %s" % (cmd))
+                httpError(conn, 400, "Invalid Dirpy command")
+                logger.error("Invalid Dirpy command: %s" % (cmd))
                 continue
 
             # Make sure we have at least a width or a height if we are
@@ -109,12 +99,13 @@ def dirpyWorker(connQueue): ###################################################
 
             # If we are distorting (not obeying aspect ratio) or cropping,
             # then we have to have both height AND width
-            if (distort or crop) and not (reqX and reqY):
-                httpError(conn, 400, "Need height and width for distort/crop")
+            if (distort or crop or pad) and not (reqX and reqY):
+                httpError(conn, 400, 
+                    "Need both height and width for distort/crop/pad")
                 continue
 
             # Set our resampling filter
-            filterName = query['filter'] if 'filter' in query else 'antialias'
+            filterName = query['filter'] if 'filter' in query else None
             if filterName == 'bilinear':
                 filter = Image.BILINEAR
             elif filterName == 'bicubic':
@@ -122,34 +113,36 @@ def dirpyWorker(connQueue): ###################################################
             elif filterName == 'nearest':
                 filter = Image.NEAREST
             else:
+                filterName = 'antialias';
                 filter = Image.ANTIALIAS
+
+            # Normalize our path (and prevent directory traversal)
+            localFile = os.path.normpath(cfg.httpRoot +
+                os.path.normpath("/" + path))
 
             # Determine whether we are proxying or not.  If we are
             # proxying, use urllib2 to open the remote file.
             fileObj = None
-            if "proxy" in query:
+            if "proxy" in query and not ("fallback" in query and
+                    os.path.isfile(localFile)):
                 proxyUrl = urllib.unquote(query['proxy']) + path
                 filePath = proxyUrl
                 logger.debug("Requesting proxy url: %s" % proxyUrl)
                 try:
                     proxyReq = urllib2.Request(proxyUrl,
-                        headers={"User-Agent": "Snarf v" + __version__})
+                        headers={"User-Agent": "Dirpy v" + __version__})
                     proxyRes = urllib2.urlopen(proxyReq)
-                    proxyCode = proxyRes.getcode()
-                    if proxyCode != 200:
-                        raise Exception("Got %s error from proxy" % proxyCode)
                     fileObj = cStringIO.StringIO(proxyRes.read())
                 except Exception as e:
-                    httpError(conn, 500, "Proxy error")
+                    proxyCode = e.code or 500
+                    httpError(conn, proxyCode, "Proxy error: %s" % e)
                     logger.info("Proxy error; url: '%s', error: '%s'" %
                         (proxyUrl, e))
                     continue
 
             # If we're not proxying, look for the file locally
             else:
-                # Normalize our path (and prevent directory traversal)
-                filePath = os.path.join(cfg.httpRoot 
-                    + os.path.normpath("/" + path))
+                filePath = localFile
                 logger.debug("Serving local file: %s" % filePath)
 
                 # Try to open our file
@@ -186,6 +179,7 @@ def dirpyWorker(connQueue): ###################################################
             # fill in missing height/width values
             origX, origY = imIn.size
             newX, newY = reqX, reqY
+            aspect=None
             if cmd != "degrade" and not distort:
                 if not newY:
                     resizeRatio = float(newX)/origX
@@ -193,6 +187,7 @@ def dirpyWorker(connQueue): ###################################################
                     resizeRatio = float(newY)/origY
                 else:
                     if crop:
+                        aspect="crop"
                         resizeRatio = max(float(newX)/origX, float(newY)/origY)
                     else:
                         resizeRatio = min(float(newX)/origX, float(newY)/origY)
@@ -202,17 +197,35 @@ def dirpyWorker(connQueue): ###################################################
                 newY = int(origY * resizeRatio)
 
                 # Use draft size hinting to considerably speed things up
-                # if we are downsampling
+                # if we are downsampling (and it wont hurt upsampling)
                 imIn.draft(None,(newX,newY))
 
             # If we are doing a distort resize, we don't need to worry about
-            # doing aspect ration calculations, since we just resize to the
+            # doing aspect ratio calculations, since we just resize to the
             # requestion dimensions regardless of aspect ratios
             elif cmd != "degrade" and distort:
+                aspect="distort"
                 imIn.draft(None,(reqX,reqY))
 
+            # Send some detailed debug info
+            if not aspect:
+                if pad:
+                    aspect="pad"
+                else:
+                    aspect="preserve"
+
+            logger.debug(("Processing %s: cmd=%s origX=%s origY=%s " +
+                "reqX=%s reqY=%s aspect=%s filter=%s outFmt=%s") % 
+                (filePath, cmd, origX, origY, reqX, reqY, aspect,
+                filterName, outFmt))
+
             # Load the source image
-            imIn.load()
+            try:
+                imIn.load()
+            except:
+                httpError(conn, 500, "Error loading image")
+                logger.error("Error loading image %s: %s" % (filePath,e))
+
 
             # Process resize commands, honoring shrink and enlarge constraints
             if cmd in ("shrink","enlarge","resize"):
@@ -266,10 +279,11 @@ def dirpyWorker(connQueue): ###################################################
                 # Crop our image to the requested size. Once again, don't
                 # bother if the image size already matches the requested
                 elif crop and (reqX != newX or reqY != newY):
-                    cropLeft    = (newX-reqX)/2
-                    cropRight   = cropLeft+reqX
-                    cropTop     = (newY-reqY)/2
-                    cropBottom  = cropTop+reqY
+                    cropRight   = (newX-reqX)/2+reqX
+                    cropLeft    = reqX-cropRight
+                    cropBottom  = (newY-reqY)/2+reqY
+                    cropTop     = reqY-cropBottom
+
                     try:
                         imCrop = imOut.crop((cropLeft, cropTop,
                             cropRight, cropBottom))
@@ -281,8 +295,13 @@ def dirpyWorker(connQueue): ###################################################
                             (filePath, e))
                         continue
 
+            # We dont do any image transformations for quality degradation;
+            # just copy the input image to the output image
+            elif cmd == "degrade":
+               imOut = imIn 
+
             # Set output quality (only affects jpeg/webp formats)
-            qualVal = 0
+            qualVal = 100
             if outFmt in ('jpeg', 'webp') and 'quality' in query:
                 try:
                     qualVal = int(query['quality'])
@@ -300,7 +319,9 @@ def dirpyWorker(connQueue): ###################################################
                 outSize = outBuf.tell()
                 outBuf.seek(0)
             except Exception as e:
-                httpError(conn, 500, "Error converting image (%s)" % e)
+                httpError(conn, 500, "Error converting image")
+                logger.error("Error converting image '%s': %s" % 
+                    (filePath, e))
                 continue
 
             send(conn, "HTTP/1.1 200 OK")
@@ -316,6 +337,10 @@ def dirpyWorker(connQueue): ###################################################
                         conn.sendall(buf)
                 except:
                     pass
+
+            logger.debug(
+                "Done processing %s: quality=%s, size=%s, dim=%sx%s" % 
+                ((filePath,qualVal,outSize)+imOut.size))
 
         except socket.timeout:
             httpError(conn, 408, "Request Timeout")
@@ -353,7 +378,7 @@ def readConfig(): ##########################################################
     parser = argparse.ArgumentParser(
         description="DIRPY: the Dynamic Image Resizing Program, Yay!")
     parser.add_argument("-c", "--config-file", default="/etc/dirpy.conf",
-        help="Path to the dirpy config file")
+        help="Path to the Dirpy config file")
     parser.add_argument("-d", "--debug", action="store_true",
         help="Emit debug output")
     parser.add_argument("-f", "--foreground", action="store_true",
@@ -388,6 +413,8 @@ def readConfig(): ##########################################################
         'global', 'numworkers', multiprocessing.cpu_count())
     cfg.maxPixels   = cfgInt(cfgParser,
         'global', 'maxPixels', 90000000)
+    cfg.defQuality  = cfgInt(cfgParser,
+        'global', 'defQuality', 100)
 
 
 # Grab an string from our config
@@ -521,6 +548,14 @@ def daemonize(): #############################################################
 
 # Our main loop
 def main(): ##################################################################
+
+    # Gracefully exit if PIL (our one non-standard Python module) is missing
+    try:
+        from PIL import Image
+    except:
+        print ("Missing the PIL module; please consult the README.md " +
+            "file for instructions on how to install PIL.")
+        sys.exit(1)
 
     # Read command line parameters and config file
     readConfig()
