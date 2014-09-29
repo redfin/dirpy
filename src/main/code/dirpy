@@ -5,6 +5,15 @@ __version__ = "0.1"
 import os, sys, datetime, ConfigParser, argparse, logging, signal
 import Queue, multiprocessing.pool, socket, cStringIO, urllib, urllib2
 
+# Gracefully exit if PIL (our one non-standard Python module) is missing
+try:
+    from PIL import Image
+except:
+    print ("Missing the PIL module; please consult the README.md " +
+        "file for instructions on how to install PIL.")
+    sys.exit(1)
+
+
 # Our dirpy worker thread.  This is where all the heavy lifting is done #######
 def dirpyWorker(connQueue): ###################################################
 
@@ -548,14 +557,6 @@ def daemonize(): #############################################################
 
 # Our main loop
 def main(): ##################################################################
-
-    # Gracefully exit if PIL (our one non-standard Python module) is missing
-    try:
-        from PIL import Image
-    except:
-        print ("Missing the PIL module; please consult the README.md " +
-            "file for instructions on how to install PIL.")
-        sys.exit(1)
 
     # Read command line parameters and config file
     readConfig()
