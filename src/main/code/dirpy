@@ -79,7 +79,7 @@ def dirpyWorker(connQueue): ###################################################
                 continue
 
             cmd = query["cmd"]
-            if cmd not in ("shrink","grow","resize","degrade"):
+            if cmd not in ("shrink","enlarge","resize","degrade"):
                 httpError(conn, 400, "Invalid Dirpy command")
                 logger.error("Invalid Dirpy command: %s" % (cmd))
                 continue
