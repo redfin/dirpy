@@ -288,10 +288,10 @@ def dirpyWorker(connQueue): ###################################################
                 # Crop our image to the requested size. Once again, don't
                 # bother if the image size already matches the requested
                 elif crop and (reqX != newX or reqY != newY):
-                    cropRight   = (newX-reqX)/2+reqX
-                    cropLeft    = reqX-cropRight
-                    cropBottom  = (newY-reqY)/2+reqY
-                    cropTop     = reqY-cropBottom
+                    cropLeft    = (newX-reqX)/2
+                    cropRight   = reqX+cropLeft
+                    cropTop     = (newY-reqY)/2
+                    cropBottom  = reqY+cropTop 
 
                     try:
                         imCrop = imOut.crop((cropLeft, cropTop,
