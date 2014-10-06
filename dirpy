@@ -1,0 +1,613 @@
+#!/platform/python/bin/python
+
+__version__ = "0.1"
+
+import os, sys, datetime, ConfigParser, argparse, logging, signal
+import Queue, multiprocessing.pool, socket, cStringIO, urllib, urllib2
+
+# Gracefully exit if PIL (our one non-standard Python module) is missing
+try:
+    from PIL import Image
+except:
+    print ("Missing the PIL module; please consult the README.md " +
+        "file for instructions on how to install PIL.")
+    sys.exit(1)
+
+
+# Our dirpy worker thread.  This is where all the heavy lifting is done #######
+def dirpyWorker(connQueue): ###################################################
+
+    # Accept connections by reading from the blocking connection
+    # queue
+    while True:
+
+        conn = connQueue.get()
+        fh = conn.makefile()
+
+        conn.settimeout(5)
+        try:
+            # Grab our request line; ignore leading whitespace
+            reqLine = ""
+            while not reqLine:
+                reqLine = fh.readline().strip()
+
+            # Parse our request header
+            req = reqLine.split(None, 2)
+
+            # Make sure that we received a header in (method) (uri) (version)
+            # format.  We don't care about the version, really
+            if len(req) != 3:
+                logger.debug("Got bad request (%s) from %s:%s" % (
+                    ((reqLine,) +  conn.getpeername())))
+                httpError(conn, 400, "Bad Request")
+                continue
+
+            # Only honor GET/HEAD requests, return a 405 error otherwise
+            method, path, httpVer = req
+            method = method.lower()
+            if method not in ("get","head"):
+                httpError(conn, 405, "Method Not Allowed")
+                logger.debug("Got bad method (%s) from %s:%s" % (
+                    ((method,) +  conn.getpeername())))
+                continue
+
+            # Parse our query string and turn it into a dict named "query"
+            query = {}
+            if "?" in req[1]:
+                path, queryStr = req[1].split("?",1)
+                logger.debug("Request from %s:%s, path: %s, query: %s" %
+                    (conn.getpeername() + (path,queryStr)))
+                for pair in queryStr.split("&"):
+                    var = val = ""
+                    if "=" in pair:
+                        var, val = pair.split("=",1)
+                        var = urllib.unquote(var).decode("utf8").lower()
+                    else:
+                        var = pair
+                    var = urllib.unquote(var).decode("utf8").lower()
+
+                    query[var] = val
+
+            # Ignore the rest of our headers; read until we get a blank line
+            while fh.readline().strip() != "":
+                pass
+
+            # Make sure we have a (valid) command
+            if "cmd" not in query:
+                httpError(conn, 400, "Missing Dirpy command")
+                logger.error("Missing Dirpy command")
+                continue
+
+            cmd = query["cmd"]
+            if cmd not in ("shrink","enlarge","resize","degrade"):
+                httpError(conn, 400, "Invalid Dirpy command")
+                logger.error("Invalid Dirpy command: %s" % (cmd))
+                continue
+
+            # Make sure we have at least a width or a height if we are
+            # doing any sort of transformation.  We store these as 'reqX' and
+            # 'reqY', respectively (i.e. the "requested" dimensions)
+            try:
+                reqX  = int(query["width"]) if "width" in query else None
+                reqY = int(query["height"]) if "height" in query else None
+            except:
+                httpError(conn, 400, "Height and width must be numeric")
+                continue
+            if cmd != "degrade" and not (reqX or reqY):
+                httpError(conn, 400, "Need height and/or width for " + cmd)
+                continue
+
+            distort = "distort" in query
+            crop    = "crop" in query
+            pad     = "pad" in query
+
+            # Handle mutually exclusive options
+            if crop + distort + pad > 1:
+                httpError(conn, 400, "Distort/Crop/Pad are mutually exclusive")
+                continue
+
+            # If we are distorting (not obeying aspect ratio) or cropping,
+            # then we have to have both height AND width
+            if (distort or crop or pad) and not (reqX and reqY):
+                httpError(conn, 400, 
+                    "Need both height and width for distort/crop/pad")
+                continue
+
+            # Set our resampling filter
+            filterName = query['filter'] if 'filter' in query else None
+            if filterName == 'bilinear':
+                filter = Image.BILINEAR
+            elif filterName == 'bicubic':
+                filter = Image.BICUBIC
+            elif filterName == 'nearest':
+                filter = Image.NEAREST
+            else:
+                filterName = 'antialias';
+                filter = Image.ANTIALIAS
+
+            # Normalize our path (and prevent directory traversal)
+            localFile = os.path.normpath(cfg.httpRoot +
+                os.path.normpath("/" + path))
+
+            # Determine whether we are proxying or not.  If we are
+            # proxying, use urllib2 to open the remote file.
+            fileObj = None
+            if "proxy" in query and not ("fallback" in query and
+                    os.path.isfile(localFile)):
+                proxyUrl = urllib.unquote(query['proxy']) + path
+                filePath = proxyUrl
+                logger.debug("Requesting proxy url: %s" % proxyUrl)
+                try:
+                    proxyReq = urllib2.Request(proxyUrl,
+                        headers={"User-Agent": "Dirpy v" + __version__})
+                    proxyRes = urllib2.urlopen(proxyReq)
+                    fileObj = cStringIO.StringIO(proxyRes.read())
+                except Exception as e:
+                    proxyCode = e.code or 500
+                    httpError(conn, proxyCode, "Proxy error: %s" % e)
+                    logger.info("Proxy error; url: '%s', error: '%s'" %
+                        (proxyUrl, e))
+                    continue
+
+            # If we're not proxying, look for the file locally
+            else:
+                filePath = localFile
+                logger.debug("Serving local file: %s" % filePath)
+
+                # Try to open our file
+                try:
+                    fileObj = open(filePath, "rb")
+                except Exception as e:
+                    httpError(conn, 404, "Access Denied")
+                    logger.info("Error opening local file '%s': %s" %
+                        (filePath, e))
+                    continue
+
+            # Process the image
+            try:
+                imIn = Image.open(fileObj)
+                # Guard against decompression bombs
+                if cfg.maxPixels and imIn.size[0] * imIn.size[1] > cfg.maxPixels:
+                    raise Exception("Image exceeds maximum pixel count")
+            except Exception as e:
+                httpError(conn, 500, "Error opening image file")
+                logger.info("Error opening '%s' as image: %s" % (filePath, e))
+                continue
+
+            # Spot check our output format
+            if 'format' in query:
+                outFmt = query['format']
+            elif imIn.format:
+                outFmt = imIn.format.lower()
+            else:
+                logger.debug("Can't determine encoder; falling back to jpeg")
+                outFmt = 'jpg' # Fall back to jpeg
+
+
+            # Preserve aspect ratio unless told not to do so.  Also
+            # fill in missing height/width values
+            origX, origY = imIn.size
+            newX, newY = reqX, reqY
+            aspect=None
+            if cmd != "degrade" and not distort:
+                if not newY:
+                    resizeRatio = float(newX)/origX
+                elif not newX:
+                    resizeRatio = float(newY)/origY
+                else:
+                    if crop:
+                        aspect="crop"
+                        resizeRatio = max(float(newX)/origX, float(newY)/origY)
+                    else:
+                        resizeRatio = min(float(newX)/origX, float(newY)/origY)
+
+                # Re-evaluate our target dimentions to preserve aspect ratio
+                newX = int(origX * resizeRatio)
+                newY = int(origY * resizeRatio)
+
+                # Use draft size hinting to considerably speed things up
+                # if we are downsampling (and it wont hurt upsampling)
+                imIn.draft(None,(newX,newY))
+
+            # If we are doing a distort resize, we don't need to worry about
+            # doing aspect ratio calculations, since we just resize to the
+            # requestion dimensions regardless of aspect ratios
+            elif cmd != "degrade" and distort:
+                aspect="distort"
+                imIn.draft(None,(reqX,reqY))
+
+            # Send some detailed debug info
+            if not aspect:
+                if pad:
+                    aspect="pad"
+                else:
+                    aspect="preserve"
+
+            logger.debug(("Processing %s: cmd=%s origX=%s origY=%s " +
+                "reqX=%s reqY=%s aspect=%s filter=%s outFmt=%s") % 
+                (filePath, cmd, origX, origY, reqX, reqY, aspect,
+                filterName, outFmt))
+
+            # Load the source image
+            try:
+                imIn.load()
+            except:
+                httpError(conn, 500, "Error loading image")
+                logger.error("Error loading image %s: %s" % (filePath,e))
+
+
+            # Process resize commands, honoring shrink and enlarge constraints
+            if cmd in ("shrink","enlarge","resize"):
+                if ((not crop and
+                        (cmd == "shrink" and (newX > origX or newY > origY) or
+                        cmd == "enlarge" and (newX < origX or newY < origY))) or
+                   (crop and
+                        (cmd == "shrink" and newX > origX and newY > origY or
+                        cmd == "enlarge" and newX < origX and newY < origY))):
+                    imOut = imIn
+                else:
+                    imOut = imIn.resize((newX, newY), filter)
+
+                # Do image padding (to make the output image match the
+                # requested size). Don't bother if the image already
+                # matches the required size
+                if pad and (reqX != newX or reqY != newY):
+                    padColor = query["pad"]
+                    padMode = imOut.mode
+
+                    # If we have a transparent background color selected and
+                    # we arent in alpha-channel RGB mode, switch to that mode
+                    if padColor == "transparent":
+                        if padMode != "RGBA":
+                            padMode = "RGBA"
+
+                        # Convert our transparency string to an alpha channel
+                        padColor = (255,255,255,255)
+
+                    # If we aren't in RGB mode and someone passes a non-int
+                    # color, revert to RGB mode
+                    if padMode[:3] != "RGB":
+                        try:
+                            padColor = int(padColor)
+                        except:
+                            padMode = "RGB"
+
+                    # Now embed the resized image into a new padded image
+                    # Use center gravity by default, for now.  We might add
+                    # user-configurable gravities later
+                    try:
+                        imPad = Image.new(padMode, (reqX, reqY), padColor)
+                        imPad.paste(imOut, ((reqX-newX)/2, (reqY-newY)/2))
+                        imOut = imPad
+                    except Exception as e:
+                        httpError(conn, 500, "Error padding image")
+                        logger.error("Error padding image %s: %s" %
+                            (filePath,e))
+                        continue
+
+                # Crop our image to the requested size. Once again, don't
+                # bother if the image size already matches the requested
+                elif crop and (reqX != newX or reqY != newY):
+                    cropLeft    = (newX-reqX)/2
+                    cropRight   = reqX+cropLeft
+                    cropTop     = (newY-reqY)/2
+                    cropBottom  = reqY+cropTop 
+
+                    try:
+                        imCrop = imOut.crop((cropLeft, cropTop,
+                            cropRight, cropBottom))
+                        imCrop.load()
+                        imOut = imCrop
+                    except Exception as e:
+                        httpError(conn, 500, "Error cropping image")
+                        logger.error("Error cropping image: %s" %
+                            (filePath, e))
+                        continue
+
+            # We dont do any image transformations for quality degradation;
+            # just copy the input image to the output image
+            elif cmd == "degrade":
+               imOut = imIn 
+
+            # Set output quality (only affects jpeg/webp formats)
+            qualVal = 100
+            if outFmt in ('jpeg', 'webp') and 'quality' in query:
+                try:
+                    qualVal = int(query['quality'])
+                    minDegradePixels = (int(query['mindegradepixels']) 
+                        if 'mindegradepixels' in query 
+                        else cfg.minDegradePixels)
+
+                    # Make sure we got a valid quality percentage
+                    if not 0 < qualVal < 101:
+                        raise Exception("Invalid quality")
+
+                    # Dont degrade input images that are less than this size
+                    if imIn.size[0] * imIn.size[1] < minDegradePixels:
+                        qualVal=100
+                except Exception as e:
+                    logger.error("Failed to set quality to '%s': %s" %
+                        (qualVal, e))
+
+            # Now write the converted image to a buffer
+            try:
+                outBuf = cStringIO.StringIO()
+                imOut.save(outBuf, outFmt, quality=qualVal)
+                outBuf.seek(0,os.SEEK_END)
+                outSize = outBuf.tell()
+                outBuf.seek(0)
+            except Exception as e:
+                httpError(conn, 500, "Error converting image")
+                logger.error("Error converting image '%s': %s" % 
+                    (filePath, e))
+                continue
+
+            send(conn, "HTTP/1.1 200 OK")
+            send(conn, "Content-Type: image/%s" % outFmt)
+            send(conn, "Content-Length: %s" % outSize)
+            send(conn, "")
+            if method == "get":
+                try:
+                    while True:
+                        buf = outBuf.read(4096)
+                        if not buf:
+                            break
+                        conn.sendall(buf)
+                except:
+                    pass
+
+            logger.debug(
+                "Done processing %s: quality=%s, size=%s, dim=%sx%s" % 
+                ((filePath,qualVal,outSize)+imOut.size))
+
+        except socket.timeout:
+            httpError(conn, 408, "Request Timeout")
+            continue
+
+        shutdown(conn)
+
+# Throw an HTTP error and shut the socket down
+def httpError(conn, code, msg):
+    send(conn, "HTTP/1.1 %s %s" % (code, msg))
+    send(conn, "")
+    send(conn, "<html><body>%s %s</body></html>" % (code, msg))
+    shutdown(conn)
+
+# Shutdown a socket connection gracefully
+def shutdown(conn):
+    try:
+        conn.shutdown(socket.SHUT_RDWR)
+        conn.close()
+    except:
+        pass
+
+# Send a message out to our SMTP client, with graceful failure
+def send(conn, msg): #########################################################
+    try:
+        conn.sendall(msg + "\r\n")
+    except socket.error, err:
+        pass
+
+
+# Read in the command line and file based configuration parameters
+def readConfig(): ##########################################################
+
+    # Build our config parser
+    parser = argparse.ArgumentParser(
+        description="DIRPY: the Dynamic Image Resizing Program, Yay!")
+    parser.add_argument("-c", "--config-file", default="/etc/dirpy.conf",
+        help="Path to the Dirpy config file")
+    parser.add_argument("-d", "--debug", action="store_true",
+        help="Emit debug output")
+    parser.add_argument("-f", "--foreground", action="store_true",
+        help="Don't daemonize; run program in the foreground")
+
+    # Parse command line
+    global cfg
+    cfg = parser.parse_args()
+
+    # Open our config file
+    cfgParser = ConfigParser.RawConfigParser()
+    try:
+        if not cfgParser.read(cfg.config_file):
+            cfg.defaults = True
+        else:
+            cfg.defaults = False
+    except Exception as e:
+        fatal("Unable to load config file '%s': %s" % (cfg.config_file, e))
+
+    # Read in all of our global / default options
+    cfg.pidFile     = cfgStr(cfgParser,
+        'global', 'pidFile','/var/run/dirpy/dirpy.pid')
+    cfg.logFile     = cfgStr(cfgParser,
+        'global', 'logFile','/var/log/dirpy.log')
+    cfg.bindAddr    = cfgStr(cfgParser,
+        'global', 'bindAddr', '0.0.0.0')
+    cfg.bindPort    = cfgInt(cfgParser,
+        'global', 'bindPort', 3000)
+    cfg.httpRoot    = cfgStr(cfgParser,
+        'global', 'httpRoot', '/var/www/html')
+    cfg.numWorkers  = cfgInt(cfgParser,
+        'global', 'numworkers', multiprocessing.cpu_count())
+    cfg.maxPixels   = cfgInt(cfgParser,
+        'global', 'maxPixels', 90000000)
+    cfg.defQuality  = cfgInt(cfgParser,
+        'global', 'defQuality', 100)
+    cfg.minDegradePixels  = cfgInt(cfgParser,
+        'global', 'minDegradePixels', 0)
+
+
+# Grab an string from our config
+def cfgStr(cfg, section, name, default=None): ################################
+    try:
+        return cfg.get(section, name)
+    except ConfigParser.Error:
+        if default is not None:
+            return default
+        fatal("Missing required config parameter %s:%s." % (section, name))
+
+
+# Grab an int from our config, complain if it isn't valid
+def cfgInt(cfg, section, name, default=None): ################################
+    try:
+        return cfg.getint(section, name)
+    except ValueError:
+        fatal("Config parameter %s:%s must be an integer." % (section, name))
+    except ConfigParser.Error:
+        if default is not None:
+            return default
+        fatal("Missing required config parameter %s:%s." % (section, name))
+
+
+# Grab an network address from our config, complain if it isn't valid
+def cfgAddr(cfg, section, name, default=None): ###############################
+    # Fetch and validate a hostname/ip address config option
+    try:
+        addr = cfg.get(section, name)
+        socket.gethostbyname(addr)
+        return addr
+    except ConfigParser.Error:
+        if default is not None:
+            return default
+        fatal("Missing required config parameter %s:%s." % (section, name))
+    except socket.gaierror:
+        fatal("Invalid address for config parameter %s:%s" % (section, name))
+
+
+def loggerSetup(): ###########################################################
+
+    # Log configuration
+
+    # Set our maximum severity level to log (i.e. debug or not)
+    logLevel = logging.DEBUG if cfg.debug else logging.INFO
+    if cfg.foreground:
+        logFh = sys.stdout
+    else:
+        try:
+            logFh = open(cfg.logFile, 'a')
+        except IOError as e:
+            fatal("Unable to log to %s (%S)" % (cfg.logFile, e.strerror))
+
+    logging.basicConfig(
+        stream=logFh,
+        level=logLevel,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="[%Y-%m-%d@%H:%M:%S]"
+    )
+
+    global logger
+    logger = logging.getLogger("dirpy")
+
+    # Make the logger emit all unhandled exceptions
+    # sys.excepthook = lambda t, v, x: logger.exception(str(v))
+
+    if cfg.defaults:
+        logger.info("Can't read config file %s; using default values" %
+            cfg.config_file)
+
+
+# Throw a fatal message and exit
+def fatal(msg): ##############################################################
+
+    try:
+        logger
+    # If our logger isnt defined, print directly to stdout
+    except:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d@%H:%M:%S")
+        print "[%s] CRITICAL: %s" % (ts, msg)
+    # Otherwise, just use the logger
+    else:
+        logger.critical(msg)
+
+    sys.exit(1)
+
+
+# Launch our process as a daemon
+def daemonize(): #############################################################
+
+    UMASK = 0
+    MAXFD = 1024
+
+    # Fork once
+    try:
+        pid = os.fork()
+    except OSError, e:
+        fatal("Unable to fork: %s [%d]" % (e.strerror, e.errno))
+
+    # In the first child process
+    if (pid == 0):
+        os.setsid()
+
+        try:
+            pid = os.fork()
+        except OSError, e:
+            fatal("Unable to fork: %s [%d]" % (e.strerror, e.errno))
+
+        if (pid == 0):
+            os.chdir("/")
+            os.umask(UMASK)
+        else:
+            os._exit(0)
+    else:
+        os._exit(0)
+
+    # Close all open file descriptors
+    for fd in range(0, MAXFD):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    # DUP our stdout & stderr filehandles to dev null
+    os.open(os.devnull, os.O_RDWR)
+    os.dup2(0, 1)
+    os.dup2(0, 2)
+
+    return
+
+
+# Our main loop
+def main(): ##################################################################
+
+    # Read command line parameters and config file
+    readConfig()
+
+    # Daemonize, unless requested otherwise
+    if not cfg.foreground:
+        daemonize()
+
+    # Catch sigints
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit())
+
+    # Start our logger
+    loggerSetup()
+
+    # Drop our pid file
+    if not cfg.foreground:
+        with open(cfg.pidFile, 'w') as fh:
+            fh.write(str(os.getpid()))
+
+    # Set up our connection queue; used for multiplexing connections
+    connQueue = Queue.Queue()
+
+    # Start our thread pool
+    workerPool = multiprocessing.pool.ThreadPool(processes=cfg.numWorkers,
+        initializer=dirpyWorker, initargs=[connQueue])
+
+    # Start our listener socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((cfg.bindAddr, cfg.bindPort))
+    sock.listen(cfg.numWorkers)
+
+    logger.info("Dirpy daemon started! Herp da dirp!")
+    logger.info("Listing on %s:%s, using %s worker threads" %
+        (cfg.bindAddr, cfg.bindPort, cfg.numWorkers))
+
+    while True:
+        conn, addr = sock.accept()
+        logger.debug("Connection from %s:%s" % addr)
+        connQueue.put(conn)
+
+if __name__ == "__main__":
+    main()
