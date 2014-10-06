@@ -4,7 +4,7 @@ prog="dirpy"
 conf="/redfin/dirpy/dirpy.conf"
 user="nobody"
 binPath="/redfin/dirpy/dirpy"
-pidFile="/var/run/dirpy/dirpy.pid"
+pidFile="/redfin/dirpy/run/dirpy.pid"
 
 # Source function library.
 . /etc/init.d/functions
@@ -30,7 +30,7 @@ start(){
 	RETVAL=$?
 	echo
 	if test $RETVAL = 0 ; then
-		touch /var/lock/subsys/dirpy
+		touch /redfin/dirpy/run/lock
 	fi
 	return $RETVAL
 }
@@ -40,7 +40,7 @@ stop(){
 	killproc $prog
 	RETVAL=$?
 	echo
-	rm -f /var/lock/subsys/dirpy
+	rm -f /redfin/dirpy/run/lock
 	return $RETVAL
 }
 
@@ -55,7 +55,7 @@ restart(){
 }
 
 condrestart(){
-	[ -e /var/lock/subsys/dirpy ] && restart
+	[ -e /redfin/dirpy/run/lock ] && restart
 	return 0
 }
 

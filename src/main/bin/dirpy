@@ -314,8 +314,17 @@ def dirpyWorker(connQueue): ###################################################
             if outFmt in ('jpeg', 'webp') and 'quality' in query:
                 try:
                     qualVal = int(query['quality'])
+                    minDegradePixels = (int(query['mindegradepixels']) 
+                        if 'mindegradepixels' in query 
+                        else cfg.minDegradePixels)
+
+                    # Make sure we got a valid quality percentage
                     if not 0 < qualVal < 101:
                         raise Exception("Invalid quality")
+
+                    # Dont degrade input images that are less than this size
+                    if imIn.size[0] * imIn.size[1] < minDegradePixels:
+                        qualVal=100
                 except Exception as e:
                     logger.error("Failed to set quality to '%s': %s" %
                         (qualVal, e))
@@ -424,6 +433,8 @@ def readConfig(): ##########################################################
         'global', 'maxPixels', 90000000)
     cfg.defQuality  = cfgInt(cfgParser,
         'global', 'defQuality', 100)
+    cfg.minDegradePixels  = cfgInt(cfgParser,
+        'global', 'minDegradePixels', 0)
 
 
 # Grab an string from our config
