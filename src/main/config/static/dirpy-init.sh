@@ -3,7 +3,7 @@ PATH=/redfin/dirpy:/sbin:/bin:/usr/bin:/usr/sbin
 prog="dirpy"
 conf="/redfin/dirpy/dirpy.conf"
 user="nobody"
-binPath="/redfin/dirpy/dirpy"
+binPath="/redfin/dirpy/bin/dirpy"
 pidFile="/redfin/dirpy/run/dirpy.pid"
 
 # Source function library.

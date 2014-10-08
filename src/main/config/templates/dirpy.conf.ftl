@@ -2,11 +2,11 @@
 
 # Location to drop our process ID file to
 # default: /var/run/dirpy/dirpy.pid
-pidFile=/var/run/dirpy/dirpy.pid
+pidFile=/redfin/dirpy/run/dirpy.pid
 
 # Log file
 # default: /var/log/dirpy.log
-logFile=/data/nginx/dirpy.log
+logFile=/redfin/dirpy/logs/dirpy.log
 
 # Address to listen for requests on
 # default: 0.0.0.0
