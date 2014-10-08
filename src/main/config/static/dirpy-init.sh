@@ -1,7 +1,7 @@
 
 PATH=/redfin/dirpy:/sbin:/bin:/usr/bin:/usr/sbin
 prog="dirpy"
-conf="/redfin/dirpy/dirpy.conf"
+conf="/redfin/dirpy/conf/dirpy.conf"
 user="nobody"
 binPath="/redfin/dirpy/bin/dirpy"
 pidFile="/redfin/dirpy/run/dirpy.pid"
