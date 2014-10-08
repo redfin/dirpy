@@ -206,15 +206,16 @@ def dirpyWorker(connQueue): ###################################################
                 newY = int(origY * resizeRatio)
 
                 # Use draft size hinting to considerably speed things up
-                # if we are downsampling (and it wont hurt upsampling)
-                imIn.draft(None,(newX,newY))
+                if newX * newY < origX * origY:
+                    imIn.draft(None,(newX,newY))
 
             # If we are doing a distort resize, we don't need to worry about
             # doing aspect ratio calculations, since we just resize to the
             # requestion dimensions regardless of aspect ratios
             elif cmd != "degrade" and distort:
                 aspect="distort"
-                imIn.draft(None,(reqX,reqY))
+                if reqX * reqY < origX * origY:
+                    imIn.draft(None,(reqX,reqY))
 
             # Send some detailed debug info
             if not aspect:
