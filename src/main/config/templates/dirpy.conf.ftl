@@ -17,12 +17,12 @@ bindAddr=0.0.0.0
 bindPort=3000
 
 # Number of worker threads to launch on program start
-# default: # of cores in system
+# default: 2 x # of cores in system 
 <#if environment == "dev" || environment == "test" || environment == "trunk" || environment == "training">
 # Any place where we are doing image proxying, we want a larger
 # pool of worker threads, since we spend a lot of time sending
 # requested out to our CDN
-numWorkers=64
+numWorkers=16
 <#else>
 #numWorkers=
 </#if>
