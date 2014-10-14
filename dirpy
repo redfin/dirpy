@@ -50,16 +50,17 @@ def dirpyWorker(req, head=False): #############################################
     distort = "distort" in query
     crop    = "crop" in query
     pad     = "pad" in query
+    isMax   = "max" in query
 
     # Handle mutually exclusive options
-    if crop + distort + pad > 1:
-        return req.send_error(400, "Distort/Crop/Pad mutually exclusive")
+    if crop + distort + pad + isMax > 1:
+        return req.send_error(400, "Distort/crop/pad/max mutually exclusive")
 
     # If we are distorting (not obeying aspect ratio) or cropping,
     # then we have to have both height AND width
-    if (distort or crop or pad) and not (reqX and reqY):
+    if (distort or crop or pad or isMax) and not (reqX and reqY):
         return req.send_error(400, 
-            "Need both height and width for distort/crop/pad")
+            "Need both height and width for distort/crop/pad/max")
 
     # Set our resampling filter
     filterName = query['filter'] if 'filter' in query else None
@@ -140,8 +141,11 @@ def dirpyWorker(req, head=False): #############################################
         elif not newX:
             resizeRatio = float(newY)/origY
         else:
-            if crop:
-                aspect="crop"
+            if crop or isMax:
+                if crop:
+                    aspect="crop"
+                else:
+                    aspect="max"
                 resizeRatio = max(float(newX)/origX, float(newY)/origY)
             else:
                 resizeRatio = min(float(newX)/origX, float(newY)/origY)
@@ -523,9 +527,12 @@ class httpServerTimeout(BaseHTTPServer.HTTPServer): ##########################
 
     # Bind our server and set our socket timeout before we accept connects
     def server_bind(self):
-        BaseHTTPServer.HTTPServer.server_bind(self)
-        self.socket.settimeout(self.timeout)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            BaseHTTPServer.HTTPServer.server_bind(self)
+            self.socket.settimeout(self.timeout)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except Exception as e:
+            fatal("Failed to bind server: %s" % e)
 
 
 # Spawn a worker process, along with the time that it was started
