@@ -47,10 +47,14 @@ def dirpyWorker(req, head=False): #############################################
     if cmd != "degrade" and not (reqX or reqY):
         return req.send_error(400, "Need height and/or width for " + cmd)
 
-    distort = "distort" in query
-    crop    = "crop" in query
-    pad     = "pad" in query
-    isMax   = "max" in query
+    # Set our boolean operators
+    distort     = "distort" in query
+    crop        = "crop" in query
+    pad         = "pad" in query
+    isMax       = "max" in query
+    optimize    = "optimize" in query
+    progressive = "progressive" in query
+    noicc       = "noicc" in query
 
     # Handle mutually exclusive options
     if crop + distort + pad + isMax > 1:
@@ -120,11 +124,13 @@ def dirpyWorker(req, head=False): #############################################
         logger.info("Error opening '%s' as image: %s" % (filePath, e))
         return req.send_error(500, "Error opening image file")
 
-    # Spot check our output format
+    # Set and spot-check our input & output formats
+    inFmt = imIn.format.lower()
+
     if 'format' in query:
         outFmt = query['format']
-    elif imIn.format:
-        outFmt = imIn.format.lower()
+    elif inFmt:
+        outFmt = inFmt
     else:
         logger.debug("Can't determine encoder; falling back to jpeg")
         outFmt = 'jpg' # Fall back to jpeg
@@ -174,9 +180,10 @@ def dirpyWorker(req, head=False): #############################################
             aspect="preserve"
 
     logger.debug(("Processing %s: cmd=%s origX=%s origY=%s " +
-        "reqX=%s reqY=%s aspect=%s filter=%s outFmt=%s") % 
+        "reqX=%s reqY=%s aspect=%s filter=%s optimize=%s " +
+        "progressive=%s inFmt=%s outFmt=%s") % 
         (filePath, cmd, origX, origY, reqX, reqY, aspect,
-        filterName, outFmt))
+        filterName, optimize, progressive, inFmt, outFmt))
 
     # Load the source image
     try:
@@ -258,10 +265,20 @@ def dirpyWorker(req, head=False): #############################################
        imOut = imIn 
 
     # Set output quality (only affects jpeg/webp formats)
-    qualVal = 100
-    if outFmt in ('jpeg', 'webp') and 'quality' in query:
+    if outFmt in ('jpeg', 'webp'):
+        if 'quality' in query:
+            qualVal = query['quality']
+        else:
+            qualVal = cfg.defQuality
+    else:
+        qualVal = None
+
+    # Process image quality adjustments
+    if qualVal is not None:
         try:
-            qualVal = int(query['quality'])
+            # Set our quality; make sure it is an integer
+            qualVal = int(qualVal)
+            # Snarf out minimum pixel dimension value
             minDegradePixels = (int(query['mindegradepixels']) 
                 if 'mindegradepixels' in query 
                 else cfg.minDegradePixels)
@@ -271,19 +288,52 @@ def dirpyWorker(req, head=False): #############################################
                 raise Exception("Invalid quality")
 
             # Dont degrade input images that are less than this size
-            if imIn.size[0] * imIn.size[1] < minDegradePixels:
-                qualVal=100
+            if origX * origY < minDegradePixels:
+                logger.debug("Not degrading image: %s < %s" % 
+                    (imIn.size[0] * imIn.size[1], minDegradePixels))
+                qualVal=95
+
         except Exception as e:
             logger.error("Failed to set quality to '%s': %s" %
                 (qualVal, e))
 
+    # Preserve our ICC profile if this is a JPEG, unless explicitly
+    # requested otherwise
+    iccProf = None
+    if imIn.format.lower() == "jpeg" and not noicc:
+        iccProf = imIn.info.get('icc_profile')
+
     # Now write the converted image to a buffer
     try:
+        # set up our stringIO object, since PIL refuses to write
+        # directly to a string
         outBuf = cStringIO.StringIO()
-        imOut.save(outBuf, outFmt, quality=qualVal)
+
+        # Our output arguments.  We have to to use a kwargs pointer, since
+        # the save function will sometimes interpret the presence of
+        # an argument (regardless of its value) to mean a true value
+        kwargs = {'format' : outFmt}
+        if optimize: 
+            kwargs["optimize"] = True
+        if progressive: 
+            kwargs["progressive"] = True
+        if iccProf is not None: 
+            kwargs["icc_profile"] = iccProf
+        if qualVal is not None:
+            kwargs["quality"] = qualVal
+
+        # Save our image to the strinIO buffer, with all of our
+        # various user-defined or default config options
+        imOut.save(outBuf, **kwargs)
+
+        # See to the end of the buffer so we can get our content
+        # size without allocating to a string (which we don't want
+        # to do if this is a HEAD request).  Then seek back to the 
+        # beginning so we can read the string later
         outBuf.seek(0,os.SEEK_END)
         outSize = outBuf.tell()
         outBuf.seek(0)
+
     except Exception as e:
         logger.error("Error converting image '%s': %s" % 
             (filePath, e))
@@ -347,58 +397,59 @@ def readConfig(): ##########################################################
 
     # Read in all of our global / default options
     cfg.pidFile     = cfgStr(cfgParser,
-        'global', 'pidFile','/var/run/dirpy/dirpy.pid')
+        'global', 'pidFile', False, '/var/run/dirpy/dirpy.pid')
     cfg.logFile     = cfgStr(cfgParser,
-        'global', 'logFile','/var/log/dirpy.log')
+        'global', 'logFile', False, '/var/log/dirpy.log')
     cfg.bindAddr    = cfgStr(cfgParser,
-        'global', 'bindAddr', '0.0.0.0')
+        'global', 'bindAddr', False,  '0.0.0.0')
     cfg.bindPort    = cfgInt(cfgParser,
-        'global', 'bindPort', 3000)
+        'global', 'bindPort', False,  3000)
     cfg.httpRoot    = cfgStr(cfgParser,
-        'global', 'httpRoot', '/var/www/html')
+        'global', 'httpRoot', False,  '/var/www/html')
     cfg.numWorkers  = cfgInt(cfgParser,
-        'global', 'numworkers', multiprocessing.cpu_count()*2)
+        'global', 'numworkers', False,  multiprocessing.cpu_count()*2)
     cfg.maxPixels   = cfgInt(cfgParser,
-        'global', 'maxPixels', 90000000)
+        'global', 'maxPixels', False,  90000000)
     cfg.defQuality  = cfgInt(cfgParser,
-        'global', 'defQuality', 100)
+        'global', 'defQuality', False,  95)
     cfg.minDegradePixels  = cfgInt(cfgParser,
-        'global', 'minDegradePixels', 0)
+        'global', 'minDegradePixels', False,  0)
     cfg.reqTimeout = cfgInt(cfgParser,
-        'global', 'reqTimeout', None)
+        'global', 'reqTimeout', False, None)
 
 
 # Grab an string from our config
-def cfgStr(cfg, section, name, default="Required"): ##########################
+def cfgStr(cfg, section, name, required=True, default=None): #################
     try:
         return cfg.get(section, name)
     except ConfigParser.Error:
-        if default is not "Required":
+        if not required:
             return default
         fatal("Missing required config parameter %s:%s." % (section, name))
 
 
 # Grab an int from our config, complain if it isn't valid
-def cfgInt(cfg, section, name, default="Required"): ##########################
+def cfgInt(cfg, section, name, required=True, default=None): ################
     try:
+        # Allow a string if they match the default value
         return cfg.getint(section, name)
     except ValueError:
         fatal("Config parameter %s:%s must be an integer." % (section, name))
     except ConfigParser.Error:
-        if default is not "Required":
+        if not required:
             return default
         fatal("Missing required config parameter %s:%s." % (section, name))
 
 
 # Grab an network address from our config, complain if it isn't valid
-def cfgAddr(cfg, section, name, default="Required"): #########################
+def cfgAddr(cfg, section, name, required=True, default=None): ################
     # Fetch and validate a hostname/ip address config option
     try:
         addr = cfg.get(section, name)
         socket.gethostbyname(addr)
         return addr
     except ConfigParser.Error:
-        if default is not "Required":
+        if not required:
             return default
         fatal("Missing required config parameter %s:%s." % (section, name))
     except socket.gaierror:
@@ -538,7 +589,7 @@ class httpServerTimeout(BaseHTTPServer.HTTPServer): ##########################
 # Spawn a worker process, along with the time that it was started
 def spawnWorker(target, args): ##############################################
 
-    # Try three times to staart a worker, and then give up
+    # Try three times to start a worker, and then give up
     attempts = 3
     while attempts > 0:
         try:

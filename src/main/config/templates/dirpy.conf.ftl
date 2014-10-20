@@ -37,8 +37,8 @@ httpRoot=/data/htdocs
 maxPixels=90000000
 
 # Default quality for lossy images, in percent
-# default: 100
-defQuality=100
+# default: 95
+defQuality=93
 
 # Minimum image size (in pixels) to allow adjustments to image quality
 # default: 0
