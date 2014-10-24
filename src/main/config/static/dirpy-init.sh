@@ -26,7 +26,7 @@ start(){
 
 	echo -n $"Starting $prog: "
 
-	daemon -20 --user=$user $binPath -d -c $conf
+	daemon -20 --user=$user $binPath -c $conf
 	RETVAL=$?
 	echo
 	if test $RETVAL = 0 ; then
