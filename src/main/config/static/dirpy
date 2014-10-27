@@ -32,7 +32,7 @@ def dirpyWorker(req, head=False): #############################################
         return req.send_error(400, "Missing Dirpy command")
 
     cmd = query["cmd"]
-    if cmd not in ("shrink","enlarge","resize","degrade"):
+    if cmd not in ("shrink","enlarge","resize","recompress"):
         logger.error("Invalid Dirpy command: %s" % cmd)
         return req.send_error(400, "Invalid Dirpy command")
 
@@ -44,7 +44,7 @@ def dirpyWorker(req, head=False): #############################################
         reqY = int(query["height"]) if "height" in query else None
     except:
         return req.send_error(400, "Height and width must be numeric")
-    if cmd != "degrade" and not (reqX or reqY):
+    if cmd != "recompress" and not (reqX or reqY):
         return req.send_error(400, "Need height and/or width for " + cmd)
 
     # Set our boolean operators
@@ -141,7 +141,7 @@ def dirpyWorker(req, head=False): #############################################
     origX, origY = imIn.size
     newX, newY = reqX, reqY
     aspect=None
-    if cmd != "degrade" and not distort:
+    if cmd != "recompress" and not distort:
         if not newY:
             resizeRatio = float(newX)/origX
         elif not newX:
@@ -167,7 +167,7 @@ def dirpyWorker(req, head=False): #############################################
     # If we are doing a distort resize, we don't need to worry about
     # doing aspect ratio calculations, since we just resize to the
     # requestion dimensions regardless of aspect ratios
-    elif cmd != "degrade" and distort:
+    elif cmd != "recompress" and distort:
         aspect="distort"
         if reqX * reqY < origX * origY:
             imIn.draft(None,(reqX,reqY))
@@ -259,9 +259,9 @@ def dirpyWorker(req, head=False): #############################################
                     (filePath, e))
                 return req.send_error(500, "Error cropping image")
 
-    # We dont do any image transformations for quality degradation;
+    # We dont do any image transformations for recompression;
     # just copy the input image to the output image
-    elif cmd == "degrade":
+    elif cmd == "recompress":
        imOut = imIn 
 
     # Set output quality (only affects jpeg/webp formats)
@@ -279,18 +279,18 @@ def dirpyWorker(req, head=False): #############################################
             # Set our quality; make sure it is an integer
             qualVal = int(qualVal)
             # Snarf out minimum pixel dimension value
-            minDegradePixels = (int(query['mindegradepixels']) 
-                if 'mindegradepixels' in query 
-                else cfg.minDegradePixels)
+            minRecompressPixels = (int(query['minrecompresspixels']) 
+                if 'minrecompresspixels' in query 
+                else cfg.minRecompressPixels)
 
             # Make sure we got a valid quality percentage
             if not 0 < qualVal < 101:
                 raise Exception("Invalid quality")
 
-            # Dont degrade input images that are less than this size
-            if origX * origY < minDegradePixels:
-                logger.debug("Not degrading image: %s < %s" % 
-                    (imIn.size[0] * imIn.size[1], minDegradePixels))
+            # Dont recompress input images that are less than this size
+            if origX * origY < minRecompressPixels:
+                logger.debug("Not recompressing image: %s < %s" % 
+                    (imIn.size[0] * imIn.size[1], minRecompressPixels))
                 qualVal=95
 
         except Exception as e:
@@ -412,8 +412,8 @@ def readConfig(): ##########################################################
         'global', 'maxPixels', False,  90000000)
     cfg.defQuality  = cfgInt(cfgParser,
         'global', 'defQuality', False,  95)
-    cfg.minDegradePixels  = cfgInt(cfgParser,
-        'global', 'minDegradePixels', False,  0)
+    cfg.minRecompressPixels  = cfgInt(cfgParser,
+        'global', 'minRecompressPixels', False,  0)
     cfg.reqTimeout = cfgInt(cfgParser,
         'global', 'reqTimeout', False, None)
 

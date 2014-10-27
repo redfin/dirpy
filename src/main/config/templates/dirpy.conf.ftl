@@ -42,4 +42,4 @@ defQuality=93
 
 # Minimum image size (in pixels) to allow adjustments to image quality
 # default: 0
-minDegradePixels=307200
+minRecompressPixels=307200
