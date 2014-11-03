@@ -318,10 +318,10 @@ def dirpyWorker(req, head=False): #############################################
         kwargs = {'format' : outFmt}
         if optimize: 
             kwargs["optimize"] = True
-            ImageFile.MAXBLOCK = imOut.size[0] * imOut.size[1]
+            ImageFile.MAXBLOCK = max(imOut.size[0] * imOut.size[1], 65536)
         if progressive: 
             kwargs["progressive"] = True
-            ImageFile.MAXBLOCK = imOut.size[0] * imOut.size[1]
+            ImageFile.MAXBLOCK = max(imOut.size[0] * imOut.size[1], 65536)
         if iccProf is not None: 
             kwargs["icc_profile"] = iccProf
         if qualVal is not None:
