@@ -316,12 +316,13 @@ def dirpyWorker(req, head=False): #############################################
         # Bump up the ImageFile.MAXBLOCK size when writing optimized or
         # progressive images to avoid a legacy PIL bug
         kwargs = {'format' : outFmt}
+        if progressive or optimize:
+            ImageFile.MAXBLOCK =  max(imIn.size[0] * imIn.size[1], 
+                imOut.size[0] * imOut.size[1], 1024**2)
         if optimize: 
             kwargs["optimize"] = True
-            ImageFile.MAXBLOCK = max(imOut.size[0] * imOut.size[1], 65536)
         if progressive: 
             kwargs["progressive"] = True
-            ImageFile.MAXBLOCK = max(imOut.size[0] * imOut.size[1], 65536)
         if iccProf is not None: 
             kwargs["icc_profile"] = iccProf
         if qualVal is not None:
