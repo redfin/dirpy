@@ -14,6 +14,9 @@ except:
         "file for instructions on how to install PIL.")
     sys.exit(1)
 
+# Workaround for truncated images
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 # Our dirpy function.  This is where all the heavy lifting is done ############
 def dirpyWorker(req, head=False): #############################################
 
@@ -188,9 +191,9 @@ def dirpyWorker(req, head=False): #############################################
     # Load the source image
     try:
         imIn.load()
-    except:
+    except Exception as e:
         logger.error("Error loading image %s: %s" % (filePath,e))
-        req.send_error(500, "Error loading image")
+        return req.send_error(500, "Error loading image")
 
 
     # Process resize commands, honoring shrink and enlarge constraints
