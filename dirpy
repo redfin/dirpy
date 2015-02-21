@@ -14,6 +14,9 @@ except:
         "file for instructions on how to install PIL.")
     sys.exit(1)
 
+# Workaround for truncated images
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 # Our dirpy function.  This is where all the heavy lifting is done ############
 def dirpyWorker(req, head=False): #############################################
 
@@ -188,9 +191,9 @@ def dirpyWorker(req, head=False): #############################################
     # Load the source image
     try:
         imIn.load()
-    except:
+    except Exception as e:
         logger.error("Error loading image %s: %s" % (filePath,e))
-        req.send_error(500, "Error loading image")
+        return req.send_error(500, "Error loading image")
 
 
     # Process resize commands, honoring shrink and enlarge constraints
@@ -318,7 +321,8 @@ def dirpyWorker(req, head=False): #############################################
         kwargs = {'format' : outFmt}
         if progressive or optimize:
             ImageFile.MAXBLOCK =  max(imIn.size[0] * imIn.size[1], 
-                imOut.size[0] * imOut.size[1], 1024**2)
+                imOut.size[0] * imOut.size[1], 2097152)
+            logger.debug("MAXBLOCK set to: %s" % ImageFile.MAXBLOCK)
         if optimize: 
             kwargs["optimize"] = True
         if progressive: 
@@ -330,7 +334,14 @@ def dirpyWorker(req, head=False): #############################################
 
         # Save our image to the strinIO buffer, with all of our
         # various user-defined or default config options
-        imOut.save(outBuf, **kwargs)
+        # Note that any "failed to suspend" errors here are typically
+        # caused by your MAXBLOCK variable being too small
+        try:
+            imOut.save(outBuf, **kwargs)
+        except Exception as e:
+            logger.error("Failed to save image: %s" % e)
+            raise Exception("Failed to execute save()")
+
 
         # See to the end of the buffer so we can get our content
         # size without allocating to a string (which we don't want
