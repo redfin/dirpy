@@ -4,7 +4,7 @@ __version__ = "0.1"
 
 import os, sys, datetime, time, ConfigParser, argparse, logging, signal
 import multiprocessing, socket, BaseHTTPServer, urllib, urllib2, urlparse
-import cStringIO
+import cStringIO, threading
 
 # Gracefully exit if PIL is missing
 try:
@@ -473,32 +473,150 @@ def cfgAddr(cfg, section, name, required=True, default=None): ################
         fatal("Invalid address for config parameter %s:%s" % (section, name))
 
 
+# Class based on WatchedFileHandler, but which is more tolerant of
+# non-existant files (i.e. those that might be in the middle of log rotation)
+class TolerantFileHandler(logging.FileHandler): ###############################
+
+    # Make note if our log file, it's device and it's inode
+    def __init__(self, filename, mode='a', encoding=None, delay=0):
+        logging.FileHandler.__init__(self, filename, mode, encoding, delay)
+
+        try:
+            stat = os.stat(self.baseFilename)
+            self.dev, self.ino = stat[ST_DEV], stat[ST_INO]
+        except OSError:
+            self.dev, self.ino = -1, -1
+
+    # Check if the file has changed; if so try and re-open it
+    def emit(self, record):
+
+        try:
+            stat = os.stat(self.baseFilename)
+            changed = (stat[ST_DEV] != self.dev) or (stat[ST_INO] != self.ino)
+        except OSError:
+            stat = None
+            changed = 1
+
+        if changed and self.stream is not None:
+            # Flushing and closing our old stream are optional, in case the
+            # file is no longer writable (or it has been deleted)
+            try:
+                self.stream.flush()
+                self.stream.close()
+            except Exception:
+                pass
+
+            self.stream = self._open()
+            if stat is None:
+                stat = os.stat(self.baseFilename)
+            self.dev, self.ino = stat[ST_DEV], stat[ST_INO]
+        logging.FileHandler.emit(self, record)
+
+
+# Class to allow appropriate multiprocess logging
+class MultiProcessingLog(logging.Handler): ###################################
+
+    # Create a queue-based log handler, which in turn will call another
+    # log handler as specified by the init.  
+    def __init__(self, subHandler):
+        logging.Handler.__init__(self)
+
+        self._handler = subHandler
+        self.queue = multiprocessing.Queue(-1)
+
+        t = threading.Thread(target=self.receive)
+        t.daemon = True
+        t.start()
+
+    # Handle custom formats; make sure our sub-formatter gets the same format
+    # spec
+    def setFormatter(self, fmt):
+        logging.Handler.setFormatter(self, fmt)
+        self._handler.setFormatter(fmt)
+
+    # Pop a message off our queue and emit it, handle sig-int's appropriately
+    def receive(self):
+        while True:
+            try:
+                record = self.queue.get()
+                self._handler.emit(record)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except EOFError:
+                break
+            except:
+                traceback.print_exc(file=sys.stderr)
+
+    # Enqueue a message for eventual emission
+    def send(self, s):
+        self.queue.put_nowait(s)
+
+    # Format our record according to our format spec; handle stack traces
+    # appropriately
+    def _format_record(self, record):
+        if record.args:
+            record.msg = record.msg % record.args
+            record.args = None
+        if record.exc_info:
+            dummy = self.format(record)
+            record.exc_info = None
+
+        return record
+
+    # Format a send a message
+    def emit(self, record):
+        try:
+            s = self._format_record(record)
+            self.send(s)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except:
+            self.handleError(record)
+
+    # Gracefully close our subhandler and ourself
+    def close(self):
+        self._handler.close()
+        logging.Handler.close(self)
+
+
 # Set up our global logger
 def loggerSetup(): ###########################################################
 
 
     # Set our maximum severity level to log (i.e. debug or not)
     logLevel = logging.DEBUG if cfg.debug else logging.INFO
-    if cfg.foreground:
-        logFh = sys.stdout
-    else:
-        try:
-            logFh = open(cfg.logFile, 'a')
-        except IOError as e:
-            fatal("Unable to log to %s (%S)" % (cfg.logFile, e.strerror))
 
-    logging.basicConfig(
-        stream=logFh,
-        level=logLevel,
-        format="%(asctime)s %(levelname)s: %(message)s",
-        datefmt="[%Y-%m-%d@%H:%M:%S]"
-    )
-
+    # Log configuration
     global logger
-    logger = logging.getLogger("dirpy")
+
+    # Log to stdout if we are running in the foreground
+    if cfg.foreground:
+        subHandler = logging.StreamHandler(sys.stdout)
+
+    # If we are running as a daemon, log to our log file
+    else:
+        if cfg.logFile == "syslog":
+            subHandler = logging.handlers.SysLogHandler()
+        else:
+            subHandler = TolerantFileHandler(cfg.logFile)
+
+    handler = MultiProcessingLog(subHandler)
+
+    try:
+        logger = logging.getLogger('dirpy')
+        logger.setLevel(logLevel)
+        handler.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s: %(message)s',
+            '[%Y-%m-%d@%H:%M:%S]'
+        ))
+        logger.addHandler(handler)
+
+    except IOError as e:
+        fatal("Unable to log to %s (%S)" % (cfg.logFile, e.strerror))
+
 
     # Make the logger emit all unhandled exceptions
-    # sys.excepthook = lambda t, v, x: logger.exception(str(v))
+    sys.excepthook = lambda t, v, x: logger.exception(str(v))
 
     if cfg.defaults:
         logger.info("Can't read config file %s; using default values" %
