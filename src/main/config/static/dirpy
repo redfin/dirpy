@@ -4,7 +4,7 @@ __version__ = "0.2"
 
 import os, sys, datetime, time, ConfigParser, argparse, logging, signal
 import multiprocessing, socket, BaseHTTPServer, urllib, urllib2, urlparse
-import cStringIO, errno
+import cStringIO, errno, traceback
 
 # Gracefully exit if PIL is missing
 try:
@@ -30,9 +30,12 @@ class dirpyImage: #############################################################
     gravity     = None
     imIn        = None
     inFmt       = None
+    inInfo      = {}
     outFmt      = None
     outBuf      = None
     outSize     = 0
+    saveOpts    = {}
+    trans       = None
 
     def __init__(self, httpRoot):
         self.httpRoot = httpRoot
@@ -94,6 +97,7 @@ class dirpyImage: #############################################################
 
             # Record our input format and dimensions
             self.inFmt = self.imIn.format.lower()
+            self.inInfo = self.imIn.info
             self.inX, self.inY = self.imIn.size
             self.origX, self.origY = self.imIn.size
 
@@ -128,20 +132,25 @@ class dirpyImage: #############################################################
         fill        = "fill" in opts            # use smaller dim. as limit
         shrink      = "shrink" in opts          # only shrink images
         grow        = "grow" in opts            # only grow images
+        landscape   = "landscape" in opts       # size images in landscape mode
+        portrait    = "portrait" in opts        # size images in portrait mode
 
         # Determine if we have any missing or conflicting options
         if not (reqX or reqY or pct):
             raise DirpyUserError("Need height and/or width or pct for resize")
         if dimSet and pct:
             raise DirpyUserError("Height/width and pct are mutually exclusive") 
-        if unlock and fill:
-            raise DirpyUserError("Unlock/fill are mutually exclusive")
-        if (unlock or fill) and not (reqX and reqY):
-            raise dirpyerror("Unlock/fill require both width and height")
+        if unlock + fill + landscape + portrait > 1:
+            raise DirpyUserError("Unlock/fill/landscape/portrait " 
+                "are mutually exclusive")
+        if (unlock or fill or landscape) and not (reqX and reqY):
+            raise dirpyerror("Unlock/fill/landscape/portrait "
+                "need both width and height")
         if shrink and grow:
             raise DirpyUserError("Shrink and grow are mutually exclusive")
         if pct and (unlock or fill):
-            raise DirpyUserError("Unlock/fill not used for pct-based resize")
+            raise DirpyUserError("Unlock/fill/landscape/portrait "
+                "not used for pct resize")
         if pct and (shrink or grow):
             raise DirpyUserError("Shrink/grow not used for pct-based resize")
 
@@ -159,14 +168,27 @@ class dirpyImage: #############################################################
 
         # Calculate height and width resize rations based on original image
         # dimensions, user-requested dimensions, and aspect ratio options
+        newX = newY = None
         if pct:
             resizeRatio = float(pct)/100
-            newX = int(self.inX * resizeRatio)
-            newY = int(self.inY * resizeRatio)
         elif unlock:
-            newX, newY = reqX, reqY
             resizeRatio = min(float(reqX)/self.inX, 
                 float(reqY)/self.inY)
+            newX, newY = reqX, reqY
+        elif landscape:
+            if self.inX > self.inY:
+                resizeRatio = max(float(reqX)/self.inX,
+                    float(reqY)/self.inY)
+            else:
+                resizeRatio = min(float(reqX)/self.inX,
+                    float(reqY)/self.inY)
+        elif portrait:
+            if self.inX < self.inY:
+                resizeRatio = max(float(reqX)/self.inX,
+                    float(reqY)/self.inY)
+            else:
+                resizeRatio = min(float(reqX)/self.inX,
+                    float(reqY)/self.inY)
         else:
             if not reqY:
                 resizeRatio = float(reqX)/self.inX
@@ -180,7 +202,9 @@ class dirpyImage: #############################################################
                     float(reqY)/self.inY)
 
             # Evaluate our target dimensions to preserve aspect ratio
+        if newX is None:
             newX = int(self.inX * resizeRatio)
+        if newY is None:
             newY = int(self.inY * resizeRatio)
 
         self.logger.debug("Resize: inX=%s inY=%s newX=%s newY=%s ratio=%s" %
@@ -200,6 +224,8 @@ class dirpyImage: #############################################################
 
     # Crop an image
     def crop(self, opts): ####################################################
+
+        return
 
         logger.debug("Cropping image %s: %s" % (self.filePath, str(opts)))
 
@@ -323,23 +349,25 @@ class dirpyImage: #############################################################
 
         # Process transparency request
         try:
-            trnsprt = int(opts["trans"]) if "trans" in opts else 0
+            self.trans = int(opts["trans"]) if "trans" in opts else 0
+            assert 0 <= self.trans <= 255
         except Exception as e:
-            raise DirpyUserError("Transparency must be an integer")
+            raise DirpyUserError("Transparency must be an integer between 0 "
+                "and 255, inclusive")
 
         # Determine what our background color tuple will be
         try:
             reqColor  = opts["bg"] if "bg" in opts else "white"
 
-            if trnsprt:
+            if self.trans is not None:
                 padMode = "RGBA"
-                padColor = ImageColor.getcolor(reqColor, padMode)
-                padColor[3] = trnsprt
+                padColor = (ImageColor.getcolor(reqColor, padMode)[:3] +  
+                    (self.trans,))
             else:
                 padMode = self.imIn.mode
                 padColor = ImageColor.getcolor(reqColor, padMode)
         except Exception as e:
-            raise DirpyUserError("Not a valid color: %s" % reqColor)
+            raise DirpyUserError("Not a valid color: %s, %s" % (reqColor,e))
         
         # Get our interior dimension locations
         newDims = self._getNewDims(opts)
@@ -426,6 +454,11 @@ class dirpyImage: #############################################################
         else:
             qualVal = None
 
+        # Handle pallette-style transparency
+        if self.outFmt in ('gif'):
+            if self.trans is not None:
+                self.saveOpts["transparency"] = self.trans
+
         # Process image quality adjustments
         if qualVal is not None:
             try:
@@ -465,27 +498,27 @@ class dirpyImage: #############################################################
 
             # Bump up the ImageFile.MAXBLOCK size when writing optimized or
             # progressive images to avoid a legacy PIL bug
-            kwargs = {'format' : self.outFmt}
+            self.saveOpts["format"] = self.outFmt
             if progressive or optimize:
                 ImageFile.MAXBLOCK =  max(
                     self.origX * self.origY, 
                     self.inX * self.inY, 2097152)
                 logger.debug("MAXBLOCK set to: %s" % ImageFile.MAXBLOCK)
             if optimize: 
-                kwargs["optimize"] = True
+                self.saveOpts["optimize"] = True
             if progressive: 
-                kwargs["progressive"] = True
+                self.saveOpts["progressive"] = True
             if iccProf is not None: 
-                kwargs["icc_profile"] = iccProf
+                self.saveOpts["icc_profile"] = iccProf
             if qualVal is not None:
-                kwargs["quality"] = qualVal
+                self.saveOpts["quality"] = qualVal
 
             # Save our image to the stringIO buffer, with all of our
             # various user-defined or default config options
             # Note that any "failed to suspend" errors here are typically
             # caused by your MAXBLOCK variable being too small
             try:
-                self.imIn.save(self.outBuf, **kwargs)
+                self.imIn.save(self.outBuf, **self.saveOpts)
             except Exception as e:
                 raise DirpyFatalError("Failed to save image: %s" % e)
 
@@ -640,6 +673,8 @@ def dirpyWorker(req, head=False): #############################################
     except DirpyUserError as e:
         logger.debug(str(e))
         return req.send_error(e.errCode, str(e))
+    except Exception as e:
+        logger.warning(traceback.format_exc())
 
     # Now fire off a response to our client
     req.send_response(200)
