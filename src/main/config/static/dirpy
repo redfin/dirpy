@@ -225,8 +225,6 @@ class dirpyImage: #############################################################
     # Crop an image
     def crop(self, opts): ####################################################
 
-        return
-
         logger.debug("Cropping image %s: %s" % (self.filePath, str(opts)))
 
         # Make sure that we have an appropriate dimension set
