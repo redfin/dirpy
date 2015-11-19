@@ -966,6 +966,7 @@ class httpTimeoutServer(BaseHTTPServer.HTTPServer): ##########################
             BaseHTTPServer.HTTPServer.server_bind(self)
             self.socket.settimeout(self.timeout)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) 
         except Exception as e:
             fatal("Failed to bind server: %s" % e)
 
