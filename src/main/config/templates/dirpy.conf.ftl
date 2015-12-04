@@ -8,25 +8,6 @@ pidFile=/redfin/dirpy/run/dirpy.pid
 # default: /var/log/dirpy.log
 logFile=/redfin/dirpy/logs/dirpy.log
 
-# Address to listen for requests on
-# default: 0.0.0.0
-bindAddr=0.0.0.0
-
-# Port to listen for requests on
-# default: 3000
-bindPort=3000
-
-# Number of worker threads to launch on program start
-# default: 2 x # of cores in system 
-<#if environment == "dev" || environment == "test" || environment == "trunk" || environment == "training">
-# Any place where we are doing image proxying, we want a larger
-# pool of worker threads, since we spend a lot of time sending
-# requested out to our CDN
-numWorkers=16
-<#else>
-#numWorkers=
-</#if>
-
 # Root directory to use for disk-based image resizing
 # default: /var/www/html
 httpRoot=/data/htdocs

@@ -1,0 +1,15 @@
+[Unit]
+Description=Dirpy image resizer
+After=syslog.target
+
+[Service]
+ExecStart=/platform/python/bin/uwsgi --emperor /redfin/dirpy/conf --logto /data/dirpy/logs/uwsgi.log
+Restart=always
+KillSignal=SIGQUIT
+Type=notify
+StandardError=syslog
+NotifyAccess=all
+
+[Install]
+WantedBy=multi-user.target
+
