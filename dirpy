@@ -4,7 +4,7 @@ __version__ = "0.3"
 
 import os, sys, datetime, time, ConfigParser, argparse, logging, signal
 import multiprocessing, socket, BaseHTTPServer, urllib, urllib2, urlparse
-import cStringIO, errno, traceback
+import cStringIO, errno, traceback, re
 
 # Gracefully exit if PIL is missing
 try:
@@ -356,6 +356,10 @@ class dirpyImage: #############################################################
         # Determine what our background color tuple will be
         try:
             reqColor  = opts["bg"] if "bg" in opts else "white"
+
+            hexMatch = re.match(r'\d{3,6}', reqColor)
+            if hexMatch:
+                reqColor = "#" + reqColor
 
             if self.trans is not None:
                 padMode = "RGBA"
@@ -829,6 +833,8 @@ def readConfig(uwsgiCfg=None): ###############################################
         'global', 'minRecompressPixels', False,  0)
     cfg.reqTimeout = cfgInt(cfgParser,
         'global', 'reqTimeout', False, None)
+    cfg.debug      = cfgBool(cfgParser,
+        'global', 'debug', cfg.debug, None)
 
 
 # Extract dirpy arguments and positional commands/options from the
@@ -886,6 +892,18 @@ def cfgInt(cfg, section, name, required=True, default=None): ################
         return cfg.getint(section, name)
     except ValueError:
         fatal("Config parameter %s:%s must be an integer." % (section, name))
+    except ConfigParser.Error:
+        if not required:
+            return default
+        fatal("Missing required config parameter %s:%s." % (section, name))
+
+# Grab an int from our config, complain if it isn't valid
+def cfgBool(cfg, section, name, required=True, default=False): ################
+    try:
+        # Allow a string if they match the default value
+        return cfg.getboolean(section, name)
+    except ValueError:
+        fatal("Config parameter %s:%s must be a boolean." % (section, name))
     except ConfigParser.Error:
         if not required:
             return default
