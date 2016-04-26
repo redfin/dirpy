@@ -21,24 +21,23 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 # on images loaded by dirpy
 class dirpyImage: #############################################################
 
-    logger      = logging.getLogger("dirpy")
-    httpRoot    = None
-    localFile   = None
-    filePath    = None
-    reqDims     = [None, None]
-    numDims     = 0
-    gravity     = None
-    imIn        = None
-    inFmt       = None
-    inInfo      = {}
-    outFmt      = None
-    outBuf      = None
-    outSize     = 0
-    saveOpts    = {}
-    trans       = None
-
     def __init__(self, httpRoot):
-        self.httpRoot = httpRoot
+        self.logger      = logging.getLogger("dirpy")
+        self.httpRoot    = None
+        self.localFile   = None
+        self.filePath    = None
+        self.reqDims     = [None, None]
+        self.numDims     = 0
+        self.gravity     = None
+        self.imIn        = None
+        self.inFmt       = None
+        self.inInfo      = {}
+        self.outFmt      = None
+        self.outBuf      = None
+        self.outSize     = 0
+        self.saveOpts    = {}
+        self.trans       = None
+        self.httpRoot    = httpRoot
 
     # Run a command, provided that it is value
     def run(self, cmd, opts):
@@ -73,7 +72,7 @@ class dirpyImage: #############################################################
             # Proxy a file from a remote server, if requested
             if proxy and not (fallback and os.path.isfile(self.localFile)):
                 self.filePath = proxy + relFile
-                logger.debug("Loading image %s: %s" % (self.filePath, str(opts)))
+                self.logger.debug("Loading image %s: %s" % (self.filePath, str(opts)))
                 proxyReq = urllib2.Request(self.filePath,
                     headers={"User-Agent": "Dirpy/" + __version__})
                 proxyRes = urllib2.urlopen(proxyReq)
@@ -82,7 +81,7 @@ class dirpyImage: #############################################################
             # Otherwise read it locally
             else:
                 self.filePath = self.localFile
-                logger.debug("Loading image %s: %s" % (self.filePath, str(opts)))
+                self.logger.debug("Loading image %s: %s" % (self.filePath, str(opts)))
                 fileObj = open(self.filePath, "rb")
 
             self.logger.debug("Serving file: %s" % self.filePath)
@@ -112,7 +111,7 @@ class dirpyImage: #############################################################
     # Resize an image
     def resize(self, opts): ##################################################
 
-        logger.debug("Resizing image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Resizing image %s: %s" % (self.filePath, str(opts)))
 
         # Fetch our percentage resize value (if any)
         try:
@@ -225,7 +224,7 @@ class dirpyImage: #############################################################
     # Crop an image
     def crop(self, opts): ####################################################
 
-        logger.debug("Cropping image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Cropping image %s: %s" % (self.filePath, str(opts)))
 
         # Make sure that we have an appropriate dimension set
         self._getReqDims(opts)
@@ -331,7 +330,7 @@ class dirpyImage: #############################################################
     # Pad an image
     def pad(self, opts): #####################################################
 
-        logger.debug("Padding image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Padding image %s: %s" % (self.filePath, str(opts)))
 
         # Make sure that we have an appropriate dimension set
         self._getReqDims(opts)
@@ -388,7 +387,7 @@ class dirpyImage: #############################################################
     # Transpose an image
     def transpose(self, opts): ###############################################
 
-        logger.debug("Transposing image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Transposing image %s: %s" % (self.filePath, str(opts)))
 
 
         # Parse possible arguments
@@ -426,7 +425,7 @@ class dirpyImage: #############################################################
     # Write an image to an CStringIO output buffer
     def save(self, opts, defQuality, minRecompressPixels): ###################
 
-        logger.debug("Saving image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Saving image %s: %s" % (self.filePath, str(opts)))
 
         # Handle save options
         noicc           = "noicc" in opts
@@ -473,20 +472,23 @@ class dirpyImage: #############################################################
 
                 # Dont recompress input images that are less than this size
                 if self.inX * self.inY < minRecompressPixels:
-                    logger.debug("Not recompressing image: %s < %s" % 
+                    self.logger.debug("Not recompressing image: %s < %s" % 
                         (self.inX * self.inY, 
                         minRecompressPixels))
                     qualVal=95
 
             except Exception as e:
-                logger.error("Failed to set quality to '%s': %s" %
+                self.logger.error("Failed to set quality to '%s': %s" %
                     (qualVal, e))
 
-        # Preserve our ICC profile if this is a JPEG, unless explicitly
-        # requested otherwise
+        # Preserve our ICC profile (if our image supports it), unless 
+        # explicitly told otherwise
         iccProf = None
-        if self.inFmt == "jpeg" and not noicc:
-            iccProf = self.imIn.info.get('icc_profile')
+        if not noicc:
+            if 'icc_profile' in self.imIn.info:
+                self.logger.debug("Adding original ICC profile to %s" % 
+                    self.filePath)
+                iccProf = self.imIn.info.get('icc_profile')
 
         # Now write the converted image to a buffer
         try:
@@ -505,7 +507,7 @@ class dirpyImage: #############################################################
                 ImageFile.MAXBLOCK =  max(
                     self.origX * self.origY, 
                     self.inX * self.inY, 2097152)
-                logger.debug("MAXBLOCK set to: %s" % ImageFile.MAXBLOCK)
+                self.logger.debug("MAXBLOCK set to: %s" % ImageFile.MAXBLOCK)
             if optimize: 
                 self.saveOpts["optimize"] = True
             if progressive: 
