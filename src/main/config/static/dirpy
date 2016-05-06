@@ -432,11 +432,6 @@ class dirpyImage: #############################################################
         progressive     = "progressive" in opts
         optimize        = "optimize" in opts
 
-        try:
-            qualVal = int(opts["qual"]) if "qual" in opts else defQuality
-        except:
-            raise dirpyUserError("Quality must be an integer")
-
         # Set and spot-check our output format
         if 'fmt' in opts:
             self.outFmt = opts['fmt']
@@ -448,8 +443,11 @@ class dirpyImage: #############################################################
 
         # Set output quality (only affects jpeg/webp formats)
         if self.outFmt in ('jpeg', 'webp'):
-            if 'quality' in opts:
-                qualVal = opts['quality']
+            if 'qual' in opts:
+                try:
+                    qualVal = int(opts["qual"])
+                except:
+                    raise dirpyUserError("Quality must be an integer")
             else:
                 qualVal = cfg.defQuality
         else:
