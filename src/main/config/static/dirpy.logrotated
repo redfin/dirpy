@@ -1,0 +1,16 @@
+/data/dirpy/logs/*.log {
+    daily
+    create 644 nobody nobody
+    sharedscripts
+    nocompress
+    postrotate
+        sleep 60
+        EXT=`date +%F --date='-1 day'`.gz
+        for f in $1;
+        do
+            gzip $f.1
+            mv $f.1.gz $f.$EXT
+        done
+    endscript
+}
+
