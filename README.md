@@ -1,5 +1,7 @@
 # Dirpy
 
+Dirpy is a dynamic image resizing tool written in Python.
+
 Dirpy can be used anywhere that a developer (or a user) requests an image of arbitrary width and/or height.  This can be useful in having responsive pages adapt to different viewport sizes (i.e. to the display sizes of newly released mobile devices), as well as in allowing for rapid development of new graphic elements.  In doing so, it can replace all images that are statically derived from a single source image (e.g. thumbnail photos).
 
 
