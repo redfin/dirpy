@@ -3,7 +3,7 @@ Description=Dirpy image resizer
 After=syslog.target
 
 [Service]
-ExecStart=/platform/python/bin/uwsgi --emperor /redfin/dirpy/conf --logto /data/dirpy/logs/uwsgi.log
+ExecStart=/usr/bin/uwsgi --emperor /etc/dirpy/conf --logto /var/log/dirpy/uwsgi.log
 Restart=always
 KillSignal=SIGQUIT
 Type=notify
