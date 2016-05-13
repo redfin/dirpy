@@ -15,30 +15,30 @@ Command
 
 ## Results
 
-|Test setup
-|--------
-|Images	|	7506
-|Baseline Images/sec (using pre-sized images)	|	285.3
+| Test setup                                   |       |
+| -------------------------------------------- | ----- |
+| Images                                       | 7506  |
+| Baseline Images/sec (using pre-sized images) | 285.3 |
 
-|Run times	|Run 1	|	Run 2	|	Run 3	|	Run 4	|	Run 5	|	Avg	|	Avg Images/sec
-|----------------
-|Node+Sharp	|	58.28	|	56.38	|	56.82	|	57.67	|	61.28	|	58.09	|	129.22
-|Python+PIL	|	49.28	|	49.83	|	47.40	|	47.48	|	47.05	|	48.21	|	155.70
-|Nginx+Gmagick	|	215.94	|	191.23	|	192.14	|	187.40	|	196.23	|	196.59	|	38.18
-
-
-|% Avg CPU Usage	|	Run 1	|	Run 2	|	Run 3	|	Run 4	|	Run 5	|	Avg
-|----------------
-|Node+Sharp	|	190.40	|	252.80	|	249.00	|	256.60	|	251.40	|	240.04
-|Python+PIL	|	136.60	|	138.20	|	139.40	|	142.00	|	143.00	|	139.84
-|Nginx+Gmagick	|	384.10	|	395.20	|	391.70	|	389.10	|	394.10	|	390.84
+| Run times     | Run 1  | Run 2  | Run 3  | Run 4  | Run 5  | Avg    | Avg Images/sec |
+| ------------- | ------ | ------ | ------ | ------ | ------ | ------ | -------------- |
+| Node+Sharp    | 58.28  | 56.38  | 56.82  | 57.67  | 61.28  | 58.09  | 129.22         |
+| Python+PIL    | 49.28  | 49.83  | 47.40  | 47.48  | 47.05  | 48.21  | 155.70         |
+| Nginx+Gmagick | 215.94 | 191.23 | 192.14 | 187.40 | 196.23 | 196.59 | 38.18          |
 
 
-|% Avg RAM Usage	|	Run 1	|	Run 2	|	Run 3	|	Run 4	|	Run 5	|	Avg
-|----------------
-|Node+Sharp	|	19.99	|	27.59	|	43.41	|	50.32	|	57.47	|	39.76
-|Python+PIL	|	1.76	|	1.68	|	1.59	|	1.64	|	1.63	|	1.66
-|Nginx+Gmagick	|	2.61	|	2.70	|	2.71	|	2.56	|	2.76	|	2.67
+| % Avg CPU Usage | Run 1  | Run 2  | Run 3  | Run 4  | Run 5  | Avg    |
+| --------------- | ------ | ------ | ------ | ------ | ------ | ------ |
+| Node+Sharp      | 190.40 | 252.80 | 249.00 | 256.60 | 251.40 | 240.04 |
+| Python+PIL      | 136.60 | 138.20 | 139.40 | 142.00 | 143.00 | 139.84 |
+| Nginx+Gmagick   | 384.10 | 395.20 | 391.70 | 389.10 | 394.10 | 390.84 |
+
+
+| % Avg RAM Usage | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Avg   |
+| --------------- | ----- | ----- | ----- | ----- | ----- | ----- |
+| Node+Sharp      | 19.99 | 27.59 | 43.41 | 50.32 | 57.47 | 39.76 |
+| Python+PIL      | 1.76  | 1.68  | 1.59  | 1.64  | 1.63  | 1.66  |
+| Nginx+Gmagick   | 2.61  | 2.70  | 2.71  | 2.56  | 2.76  | 2.67  |
 
 
 The Python+PIL option was the obvious "winner" in each metric.  Also of interest is the RAM consumption values for the Sharp-based image resizer, where you can see the memory usage of the resizer growing at a monotonic (and rather rapid) rate with each subsequent test.
