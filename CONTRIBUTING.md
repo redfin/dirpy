@@ -1,8 +1,8 @@
-Contributing Code to stratocacher
+Contributing Code to Dirpy
 ---------------------------------
 
 To get started, please [sign the Contributor License
-Agreement](https://cla-assistant.io/redfin/stratocacher). The purpose
+Agreement](https://cla-assistant.io/redfin/dirpy). The purpose
 of this license is to protect contributors, Redfin, as well as users
 of this software project. Signing this agreement does not affect your
 rights to use your contributions for any other purpose.
