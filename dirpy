@@ -1,14 +1,14 @@
 #!/platform/python/bin/python
 
-__version__ = "0.3"
+__version__ = "0.4"
 
 import os, sys, datetime, time, ConfigParser, argparse, logging, signal
 import multiprocessing, socket, BaseHTTPServer, urllib, urllib2, urlparse
-import cStringIO, errno, traceback, re
+import io, errno, traceback, re, cgi, errno
 
 # Gracefully exit if PIL is missing
 try:
-    from PIL import Image, ImageFile, ImageColor, ImageChops
+    from PIL import Image, ImageFile, ImageColor, ImageChops, ImageDraw
 except:
     print ("Missing the PIL module; please consult the README.md " +
         "file for instructions on how to install PIL.")
@@ -19,112 +19,124 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # The dirpy image class.  Defines the various operations that can be performed
 # on images loaded by dirpy
-class dirpyImage: #############################################################
+class DirpyImage: #############################################################
 
-    def __init__(self, httpRoot):
-        self.logger      = logging.getLogger("dirpy")
-        self.httpRoot    = None
-        self.localFile   = None
-        self.filePath    = None
-        self.reqDims     = [None, None]
-        self.numDims     = 0
-        self.gravity     = None
-        self.imIn        = None
-        self.inFmt       = None
-        self.inInfo      = {}
-        self.outFmt      = None
-        self.outBuf      = None
-        self.outSize     = 0
-        self.saveOpts    = {}
-        self.trans       = None
-        self.httpRoot    = httpRoot
+    def __init__(self, http_root):
+        self.logger         = logging.getLogger("dirpy")
+        self.local_file     = None
+        self.file_path      = None
+        self.req_dims       = [None, None]
+        self.num_dims       = 0
+        self.gravity        = None
+        self.im_in          = None
+        self.in_fmt         = None
+        self.in_info        = {}
+        self.out_fmt        = None
+        self.out_buf        = None
+        self.out_size       = 0
+        self.save_opts      = {}
+        self.trans          = None
+        self.http_root      = http_root
 
     # Run a command, provided that it is value
     def run(self, cmd, opts):
         if cmd.startswith("_"):
-            raise dirpyUserError("Internal method not run()-able: %s" % cmd)
+            raise DirpyUserError("Internal method not run()-able: %s" % cmd)
         try:
             method = getattr(self, cmd)
         except AttributeError:
-            raise dirpyUserError("Unknown command: %s" % cmd)
+            raise DirpyUserError("Unknown command: %s" % cmd)
 
         method(opts)
         
 
     # Load an image file, either from disk or a local HTTP(S) server
-    def load(self, relFile, opts, maxPixels): ################################
+    def load(self, opts, rel_file, req_post_data): ############################
 
-        # A file-like object to store the result of our cStringIO
+        # A file-like object to store the result of our BytesIO
         # output (in the event of a proxied result) or the contents
         # of the local file read from disk
-        fileObj = None
+        file_obj = None
 
         # Normalize our path (and prevent directory traversal)
-        self.localFile = os.path.normpath(cfg.httpRoot +
-            os.path.normpath("/" + relFile))
+        self.local_file = os.path.normpath(cfg.http_root +
+            os.path.normpath("/" + rel_file))
 
         # Parse our options
         proxy       = opts["proxy"] if "proxy" in opts else None
-        fallback    = True if "fallback" in opts else False
+        fallback    = "fallback" in opts
+        from_post   = "post" in opts
 
         # Try to open our file
         try:
+            # Load a file via POST data if the stars are aligned
+            if from_post and req_post_data:
+                if cfg.allow_post:
+                    self.logger.debug("Loading post data: %s" % str(opts))
+                    file_obj = req_post_data
+                    self.file_path = "POST_file"
+                else:
+                    raise DirpyUserError("POST prohibited.")
+
+
             # Proxy a file from a remote server, if requested
-            if proxy and not (fallback and os.path.isfile(self.localFile)):
-                self.filePath = proxy + relFile
-                self.logger.debug("Loading image %s: %s" % (self.filePath, str(opts)))
-                proxyReq = urllib2.Request(self.filePath,
+            elif proxy and not (fallback and os.path.isfile(self.local_file)):
+                self.file_path = proxy + rel_file
+                self.logger.debug("Loading image %s: %s" % 
+                    (self.file_path, str(opts)))
+                proxy_req = urllib2.Request(self.file_path,
                     headers={"User-Agent": "Dirpy/" + __version__})
-                proxyRes = urllib2.urlopen(proxyReq)
-                fileObj = cStringIO.StringIO(proxyRes.read())
+                proxy_res = urllib2.urlopen(proxy_req)
+                file_obj = io.BytesIO(proxy_res.read())
 
             # Otherwise read it locally
             else:
-                self.filePath = self.localFile
-                self.logger.debug("Loading image %s: %s" % (self.filePath, str(opts)))
-                fileObj = open(self.filePath, "rb")
+                self.file_path = self.local_file
+                self.logger.debug("Loading image %s: %s" % 
+                    (self.file_path, str(opts)))
+                file_obj = open(self.file_path, "rb")
 
-            self.logger.debug("Serving file: %s" % self.filePath)
+            self.logger.debug("Serving file: %s" % self.file_path)
         except Exception as e:
-            errCode = e.code if hasattr(e, 'code') else 404
-            raise dirpyFatalError("Error reading file: %s" % e, errCode)
+            err_code = e.code if hasattr(e, "code") else 404
+            raise DirpyUserError("Error reading file: %s" % e, err_code)
 
 
         # Read in the image from the file object
         try:
-            self.imIn = Image.open(fileObj)
+            self.im_in = Image.open(file_obj)
 
             # Record our input format and dimensions
-            self.inFmt = self.imIn.format.lower()
-            self.inInfo = self.imIn.info
-            self.inX, self.inY = self.imIn.size
-            self.origX, self.origY = self.imIn.size
+            self.in_fmt = self.im_in.format.lower()
+            self.in_info = self.im_in.info
+            self.in_x, self.in_y = self.im_in.size
+            self.orig_x, self.orig_y = self.im_in.size
 
             # Guard against decompression bombs
-            if maxPixels and self.inX * self.inY > maxPixels:
-                raise dirpyUserError("Image exceeds maximum pixel limit")
+            if cfg.max_pixels and self.in_x * self.in_y > cfg.max_pixels:
+                raise DirpyUserError("Image exceeds maximum pixel limit")
 
         except Exception as e:
-            raise dirpyFatalError("Error opening image: %s" % e)
+            raise DirpyUserError("Error opening image: %s" % e, 400)
 
 
     # Resize an image
     def resize(self, opts): ##################################################
 
-        self.logger.debug("Resizing image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Resizing image %s: %s" % (self.file_path, str(opts)))
 
         # Fetch our percentage resize value (if any)
         try:
             pct = int(opts["pct"]) if "pct" in opts else None
         except ValueError:
-            raise dirpyUserError("Percent size must be an integer: %s" % 
+            raise DirpyUserError("Percent size must be an integer: %s" % 
                 opts["pct"])
 
         # Get our dimensions (if specified)
-        dimSet = self._getReqDims(opts)
-        if len(self.reqDims) != 2 and not pct:
-            raise dirpyUserError("Resize requires either 1 or 2 dimensions")
-        reqX, reqY = self.reqDims
+        dim_set = self._get_req_dims(opts)
+        if len(self.req_dims) != 2 and not pct:
+            raise DirpyUserError("Resize requires either 1 or 2 dimensions")
+        req_x, req_y = self.req_dims
 
         # Set our boolean operators
         unlock      = "unlock" in opts          # remove aspect ratio locking
@@ -135,99 +147,99 @@ class dirpyImage: #############################################################
         portrait    = "portrait" in opts        # size images in portrait mode
 
         # Determine if we have any missing or conflicting options
-        if not (reqX or reqY or pct):
-            raise dirpyUserError("Need height and/or width or pct for resize")
-        if dimSet and pct:
-            raise dirpyUserError("Height/width and pct are mutually exclusive") 
+        if not (req_x or req_y or pct):
+            raise DirpyUserError("Need height and/or width or pct for resize")
+        if dim_set and pct:
+            raise DirpyUserError("Height/width and pct are mutually exclusive") 
         if unlock + fill + landscape + portrait > 1:
-            raise dirpyUserError("Unlock/fill/landscape/portrait " 
+            raise DirpyUserError("Unlock/fill/landscape/portrait " 
                 "are mutually exclusive")
-        if (unlock or fill or landscape) and not (reqX and reqY):
+        if (unlock or fill or landscape) and not (req_x and req_y):
             raise dirpyerror("Unlock/fill/landscape/portrait "
                 "need both width and height")
         if shrink and grow:
-            raise dirpyUserError("Shrink and grow are mutually exclusive")
+            raise DirpyUserError("Shrink and grow are mutually exclusive")
         if pct and (unlock or fill):
-            raise dirpyUserError("Unlock/fill/landscape/portrait "
+            raise DirpyUserError("Unlock/fill/landscape/portrait "
                 "not used for pct resize")
         if pct and (shrink or grow):
-            raise dirpyUserError("Shrink/grow not used for pct-based resize")
+            raise DirpyUserError("Shrink/grow not used for pct-based resize")
 
         # Set our resampling filter
-        filterName = opts["filter"] if "filter" in opts else None
-        if filterName == "nearest":
-            filterType = Image.NEAREST
-        elif filterName == "bilinear":
-            filterType = Image.BILINEAR
-        elif filterName == "bicubic":
-            filterType = Image.BICUBIC
+        filter_name = opts["filter"] if "filter" in opts else None
+        if filter_name == "nearest":
+            filter_type = Image.NEAREST
+        elif filter_name == "bilinear":
+            filter_type = Image.BILINEAR
+        elif filter_name == "bicubic":
+            filter_type = Image.BICUBIC
         else:
-            filterName = "antialias";
-            filterType = Image.ANTIALIAS
+            filter_name = "antialias";
+            filter_type = Image.ANTIALIAS
 
         # Calculate height and width resize rations based on original image
         # dimensions, user-requested dimensions, and aspect ratio options
-        newX = newY = None
+        new_x = new_y = None
         if pct:
-            resizeRatio = float(pct)/100
+            resize_ratio = float(pct)/100
         elif unlock:
-            resizeRatio = min(float(reqX)/self.inX, 
-                float(reqY)/self.inY)
-            newX, newY = reqX, reqY
+            resize_ratio = min(float(req_x)/self.in_x, 
+                float(req_y)/self.in_y)
+            new_x, new_y = req_x, req_y
         elif landscape:
-            if self.inX > self.inY:
-                resizeRatio = max(float(reqX)/self.inX,
-                    float(reqY)/self.inY)
+            if self.in_x > self.in_y:
+                resize_ratio = max(float(req_x)/self.in_x,
+                    float(req_y)/self.in_y)
             else:
-                resizeRatio = min(float(reqX)/self.inX,
-                    float(reqY)/self.inY)
+                resize_ratio = min(float(req_x)/self.in_x,
+                    float(req_y)/self.in_y)
         elif portrait:
-            if self.inX < self.inY:
-                resizeRatio = max(float(reqX)/self.inX,
-                    float(reqY)/self.inY)
+            if self.in_x < self.in_y:
+                resize_ratio = max(float(req_x)/self.in_x,
+                    float(req_y)/self.in_y)
             else:
-                resizeRatio = min(float(reqX)/self.inX,
-                    float(reqY)/self.inY)
+                resize_ratio = min(float(req_x)/self.in_x,
+                    float(req_y)/self.in_y)
         else:
-            if not reqY:
-                resizeRatio = float(reqX)/self.inX
-            elif not reqX:
-                resizeRatio = float(reqY)/self.inY
+            if not req_y:
+                resize_ratio = float(req_x)/self.in_x
+            elif not req_x:
+                resize_ratio = float(req_y)/self.in_y
             elif fill:
-                resizeRatio = max(float(reqX)/self.inX, 
-                    float(reqY)/self.inY)
+                resize_ratio = max(float(req_x)/self.in_x, 
+                    float(req_y)/self.in_y)
             else:
-                resizeRatio = min(float(reqX)/self.inX, 
-                    float(reqY)/self.inY)
+                resize_ratio = min(float(req_x)/self.in_x, 
+                    float(req_y)/self.in_y)
 
             # Evaluate our target dimensions to preserve aspect ratio
-        if newX is None:
-            newX = int(self.inX * resizeRatio)
-        if newY is None:
-            newY = int(self.inY * resizeRatio)
+        if new_x is None:
+            new_x = int(self.in_x * resize_ratio)
+        if new_y is None:
+            new_y = int(self.in_y * resize_ratio)
 
-        self.logger.debug("Resize: inX=%s inY=%s newX=%s newY=%s ratio=%s" %
-            (self.inX, self.inY, newX, newY, resizeRatio))
+        self.logger.debug("Resize: in_x=%s in_y=%s new_x=%s new_y=%s ratio=%s" %
+            (self.in_x, self.in_y, new_x, new_y, resize_ratio))
 
         # Now do the actual resize
         try:
-            if not shrink and resizeRatio > 1:
-                self.imIn = self.imIn.resize((newX, newY), filterType)
-            elif not grow and resizeRatio < 1:
-                self.imIn.draft(None,(newX,newY))
-                self.imIn = self.imIn.resize((newX, newY), filterType)
-            self.inX, self.inY = self.imIn.size
+            if not shrink and resize_ratio > 1:
+                self.im_in = self.im_in.resize((new_x, new_y), filter_type)
+            elif not grow and resize_ratio < 1:
+                self.im_in.draft(None,(new_x,new_y))
+                self.im_in = self.im_in.resize((new_x, new_y), filter_type)
+            self.in_x, self.in_y = self.im_in.size
         except Exception as e:
-            raise dirpyFatalError("Error resizing: %s" % e)
+            raise DirpyFatalError("Error resizing: %s" % e)
 
 
     # Crop an image
-    def crop(self, opts): ####################################################
+    def crop(self, opts): #####################################################
 
-        self.logger.debug("Cropping image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Cropping image %s: %s" % (self.file_path, str(opts)))
 
         # Make sure that we have an appropriate dimension set
-        self._getReqDims(opts)
+        self._get_req_dims(opts)
 
         # Handle automatic border cropping
         if "border" in opts:
@@ -241,258 +253,271 @@ class dirpyImage: #############################################################
                     if not 0 < fuzz < 255:
                         raise Exception
                 except:
-                    raise dirpyUserError(
+                    raise DirpyUserError(
                         "Crop fuzz must be an integer between 0 and 255: %s" %
                         opts["border"])
 
             # Do an image channel difference, and then get the bounding box
             # to determine where the border is
-            bg = Image.new(self.imIn.mode, self.imIn.size, 
-                self.imIn.getpixel((0,0)))
-            diff = ImageChops.difference(self.imIn, bg)
-            newDims = list(ImageChops.add(diff, diff, 2.0, -fuzz).getbbox())
+            bg = Image.new(self.im_in.mode, self.im_in.size, 
+                self.im_in.getpixel((0,0)))
+            diff = ImageChops.difference(self.im_in, bg)
+            new_dims = list(ImageChops.add(diff, diff, 2.0, -fuzz).getbbox())
 
             # Make border cropping symmetric, if requested
             if "symmetric" in opts:
-                if newDims[0] > self.inX - newDims[2]:
-                    newDims[0] = self.inX - newDims[2]
-                elif newDims[2] < self.inX - newDims[0]:
-                    newDims[2] = self.inX - newDims[0]
+                if new_dims[0] > self.in_x - new_dims[2]:
+                    new_dims[0] = self.in_x - new_dims[2]
+                elif new_dims[2] < self.in_x - new_dims[0]:
+                    new_dims[2] = self.in_x - new_dims[0]
                 
-                if newDims[1] > self.inY - newDims[3]:
-                    newDims[1] = self.inY - newDims[3]
-                elif newDims[3] < self.inY - newDims[1]:
-                    newDims[3] = self.inY - newDims[1]
+                if new_dims[1] > self.in_y - new_dims[3]:
+                    new_dims[1] = self.in_y - new_dims[3]
+                elif new_dims[3] < self.in_y - new_dims[1]:
+                    new_dims[3] = self.in_y - new_dims[1]
                 
 
         # Handle gravity crop (i.e. a dimension-based crop)
-        elif self.numDims == 2:
+        elif self.num_dims == 2:
             # Unlike coordinate-based cropping, we correct crop boundaries that
             # outside our image boundary, as we can inherit crop dimensions
             # from previous commands which may have shrank the image 
             # boundary below the specified dimensions
 
-            if self.reqDims[0] > self.inX:
-                self.reqDims[0] = self.inX
-            if self.reqDims[1] > self.inY:
-                self.reqDims[1] = self.inY
+            if self.req_dims[0] > self.in_x:
+                self.req_dims[0] = self.in_x
+            if self.req_dims[1] > self.in_y:
+                self.req_dims[1] = self.in_y
 
             # Don't bother cropping if our image is the same size as our
             # requested crop size
-            if self.reqDims[1] == self.inY and self.reqDims[0] == self.inX:
+            if self.req_dims[1] == self.in_y and self.req_dims[0] == self.in_x:
                 return
 
-            newDims = self._getNewDims(opts)
+            new_dims = self._get_new_dims(opts)
 
         # Handle the exact crop (i.e. a coordinate-based crop)
-        elif self.numDims == 4:
+        elif self.num_dims == 4:
 
             # Sanity checks
             if "gravity" in opts:
-                raise dirpyUserError("Gravity only used for dimension crops")
+                raise DirpyUserError("Gravity only used for dimension crops")
 
-            if None in self.reqDims:
-                raise dirpyUserError(
+            if None in self.req_dims:
+                raise DirpyUserError(
                     "All values required in a cordinate-based crop: %s" %
-                    str(self.reqDims))
+                    str(self.req_dims))
 
-            if not (self.reqDims[0] < self.reqDims[2] and
-                    self.reqDims[1] < self.reqDims[3]):
-                raise dirpyUserError(
+            if not (self.req_dims[0] < self.req_dims[2] and
+                    self.req_dims[1] < self.req_dims[3]):
+                raise DirpyUserError(
                     "Coordinates a,b,c,d should have a < c and b < d: " %
-                    str(self.reqDims))
+                    str(self.req_dims))
 
-            if (self.reqDims[0] < 0 or self.reqDims[1] < 0 or
-                    self.reqDims[2] > self.inX or 
-                    self.reqDims[3] > self.inY):
-                raise dirpyUserError(
+            if (self.req_dims[0] < 0 or self.req_dims[1] < 0 or
+                    self.req_dims[2] > self.in_x or 
+                    self.req_dims[3] > self.in_y):
+                raise DirpyUserError(
                     "Crop corners must be inside source image border: %s" %
-                    str(self.reqDims))
+                    str(self.req_dims))
 
-            newDims = self.reqDims
+            new_dims = self.req_dims
 
         # Handle invalid # of crop dims
         else:
-            raise dirpyUserError("Crop requires dimensions or coordinates")
+            raise DirpyUserError("Crop requires dimensions or coordinates")
 
-        self.logger.debug("Crop: inX=%s inY=%s cropBox=%s, grav=%s" %
-            (self.inX, self.inY, str(newDims), self.gravity))
+        self.logger.debug("Crop: in_x=%s in_y=%s crop_box=%s, grav=%s" %
+            (self.in_x, self.in_y, str(new_dims), self.gravity))
 
         # Now crop the image
         try:
-            self.imIn = self.imIn.crop(newDims)
-            self.imIn.load()
-            self.inX, self.inY = self.imIn.size
+            self.im_in = self.im_in.crop(new_dims)
+            self.im_in.load()
+            self.in_x, self.in_y = self.im_in.size
         except Exception as e:
-            raise dirpyFatalError("Error cropping: %s" % e)
+            raise DirpyFatalError("Error cropping: %s" % e)
 
 
     # Pad an image
-    def pad(self, opts): #####################################################
+    def pad(self, opts): ######################################################
 
-        self.logger.debug("Padding image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Padding image %s: %s" % (self.file_path, str(opts)))
 
         # Make sure that we have an appropriate dimension set
-        self._getReqDims(opts)
-        if self.numDims != 2:
-            raise dirpyUserError("Pad requires no more than 2 dimensions")
+        self._get_req_dims(opts)
+        if self.num_dims != 2:
+            raise DirpyUserError("Pad requires no more than 2 dimensions")
 
         # Sanity check
-        if (self.reqDims[0] < self.inX or 
-                self.reqDims[1] < self.inY):
-            raise dirpyUserError(
+        if (self.req_dims[0] < self.in_x or 
+                self.req_dims[1] < self.in_y):
+            raise DirpyUserError(
                 "Pad area must be larger than source image: %s < [%s,%s]" %
-                (str(self.reqDims), self.inX, self.inY))
+                (str(self.req_dims), self.in_x, self.in_y))
 
         # Process transparency request
-        try:
-            self.trans = int(opts["trans"]) if "trans" in opts else 0
-            assert 0 <= self.trans <= 255
-        except Exception as e:
-            raise dirpyUserError("Transparency must be an integer between 0 "
-                "and 255, inclusive")
+        if "trans" in opts:
+            try:
+                self.trans = int(opts["trans"]) 
+                assert 0 <= self.trans <= 255
+            except Exception as e:
+                raise DirpyUserError("Transparency must be an integer "
+                    "between 0 and 255, inclusive")
 
         # Determine what our background color tuple will be
         try:
-            reqColor  = opts["bg"] if "bg" in opts else "white"
+            if "bg" in opts:
+                req_color = opts["bg"]
+            else:
+                req_color = "white"
 
-            hexMatch = re.match(r'\d{3,6}', reqColor)
-            if hexMatch:
-                reqColor = "#" + reqColor
+            hex_match = re.match(r"[0-9a-fA-F]{3,6}", req_color)
+            if hex_match:
+                req_color = "#" + req_color
 
             if self.trans is not None:
-                padMode = "RGBA"
-                padColor = (ImageColor.getcolor(reqColor, padMode)[:3] +  
-                    (self.trans,))
+                pad_mode = "RGBA"
             else:
-                padMode = self.imIn.mode
-                padColor = ImageColor.getcolor(reqColor, padMode)
+                pad_mode = self.im_in.mode
+
+            pad_color = ImageColor.getcolor(req_color, pad_mode)
+
         except Exception as e:
-            raise dirpyUserError("Not a valid color: %s, %s" % (reqColor,e))
+            raise DirpyUserError("Not a valid color: %s, %s" % (req_color,e))
         
         # Get our interior dimension locations
-        newDims = self._getNewDims(opts)
+        new_dims = self._get_new_dims(opts)
 
         # Create the padded image and insert our old image into it and
         # then overwrite our existing input image with the paddded one
         try:
-            imPad = Image.new(padMode, self.reqDims, padColor)
-            imPad.paste(self.imIn, newDims)
-            self.imIn = imPad
-            self.inX, self.inY = self.imIn.size
+            im_pad = Image.new(pad_mode, self.req_dims, pad_color)
+            im_pad.paste(self.im_in, new_dims)
+
+            if self.trans is not None:
+                mask_dims=(new_dims[0],new_dims[1],new_dims[2]-1,new_dims[3]-1)
+                im_mask = Image.new('L', self.req_dims, color=self.trans)
+                ImageDraw.Draw(im_mask).rectangle(mask_dims, fill=255)
+                im_pad.putalpha(im_mask)
+
+            self.im_in = im_pad
+            self.in_x, self.in_y = self.im_in.size
         except Exception as e:
-            raise dirpyFatalError(
-                "Error padding image %s: %s" % (self.filePath,e))
+            raise DirpyFatalError(
+                "Error padding image %s: %s" % (self.file_path,e))
 
     # Transpose an image
-    def transpose(self, opts): ###############################################
+    def transpose(self, opts): ################################################
 
-        self.logger.debug("Transposing image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Transposing image %s: %s" % (self.file_path, str(opts)))
 
 
         # Parse possible arguments
-        numArgs = 0
+        num_args = 0
         if "flipvert" in opts:
             method = Image.FLIP_LEFT_RIGHT
-            numArgs += 1
+            num_args += 1
         if "fliphorz" in opts:
             method = Image.FLIP_TOP_BOTTOM
-            numArgs += 1
+            num_args += 1
         if "rotate90" in opts:
             method = Image.ROTATE_90
-            numArgs += 1
+            num_args += 1
         if "rotate180" in opts:
             method = Image.ROTATE_180
-            numArgs += 1
+            num_args += 1
         if "rotate270" in opts:
             method = Image.ROTATE_270
-            numArgs += 1
+            num_args += 1
 
-        if numArgs != 1:
-            raise dirpyUserError(
+        if num_args != 1:
+            raise DirpyUserError(
                 "Transpose requires exactly one option: %s" % str(opts))
 
         # Now rotate
         try:
-            self.imIn = self.imIn.transpose(method)
-            self.inX, self.inY = self.imIn.size
+            self.im_in = self.im_in.transpose(method)
+            self.in_x, self.in_y = self.im_in.size
         except Exception as e:
-            raise dirpyFatalError(
-                "Error transposing image %s: %s" % (self.filePath,e))
+            raise DirpyFatalError(
+                "Error transposing image %s: %s" % (self.file_path,e))
 
 
 
-    # Write an image to an CStringIO output buffer
-    def save(self, opts, defQuality, minRecompressPixels): ###################
+    # Write an image to a BytesIO output buffer
+    def save(self, opts): #####################################################
 
-        self.logger.debug("Saving image %s: %s" % (self.filePath, str(opts)))
+        self.logger.debug("Saving image %s: %s" % (self.file_path, str(opts)))
 
         # Handle save options
-        noicc           = "noicc" in opts
-        progressive     = "progressive" in opts
-        optimize        = "optimize" in opts
+        noicc       = "noicc" in opts
+        progressive = "progressive" in opts
+        optimize    = "optimize" in opts
+        noshow      = "noshow" in opts
+        
+        # Determine if we are being asked to save the result to disk locally
+        # (and if we are permitted to)
+        if "todisk" in opts:
+            if not cfg.allow_todisk:
+                raise DirpyUserError("Saving to disk forbidden: %s" % str(opts))
+            if not cfg.todisk_root:
+                raise DirpyUserError("Save to disk path unset: %s" % str(opts))
+            todisk_path = os.path.normpath(cfg.todisk_root +
+                os.path.normpath("/" + opts["todisk"]))
+        else:
+            todisk_path = False
 
         # Set and spot-check our output format
-        if 'fmt' in opts:
-            self.outFmt = opts['fmt']
-        elif self.inFmt:
-            self.outFmt = self.inFmt
+        if "fmt" in opts:
+            self.out_fmt = opts["fmt"].lower()
+        elif self.in_fmt:
+            self.out_fmt = self.in_fmt
         else:
             self.logger.debug("Can't determine encoder; falling back to jpeg")
-            self.outFmt = 'jpg' # Fall back to jpeg
+            self.out_fmt = "jpeg" # Fall back to jpeg
+
+        # Fix any attempts to use the non-existant "jpg" output plugin
+        if self.out_fmt == "jpg":
+            self.out_fmt = "jpeg"
 
         # Set output quality (only affects jpeg/webp formats)
-        if self.outFmt in ('jpeg', 'webp'):
-            if 'qual' in opts:
-                try:
-                    qualVal = int(opts["qual"])
-                except:
-                    raise dirpyUserError("Quality must be an integer")
-            else:
-                qualVal = cfg.defQuality
+        if self.out_fmt in ("jpeg", "webp"):
+            try:
+                qual_val = int(opts["qual"]) if "qual" in opts else cfg.def_quality
+            except:
+                raise DirpyUserError("Quality must be an integer")
+
+            # Make sure we got a valid quality percentage
+            if not 0 < qual_val < 101:
+                raise Exception("Invalid quality")
+
+            # Dont recompress input images that are less than this size
+            if self.in_x * self.in_y < cfg.min_recompress_pixels:
+                self.logger.debug("Not recompressing image: %s < %s" % 
+                    (self.in_x * self.in_y, 
+                    cfg.min_recompress_pixels))
+                qual_val=95
+
         else:
-            qualVal = None
+            qual_val = None
 
         # Handle pallette-style transparency
-        if self.outFmt in ('gif'):
+        if self.out_fmt in ("gif"):
             if self.trans is not None:
-                self.saveOpts["transparency"] = self.trans
+                self.save_opts["transparency"] = 0
 
-        # Process image quality adjustments
-        if qualVal is not None:
-            try:
-                # Set our quality; make sure it is an integer
-                qualVal = int(qualVal)
-
-                # Make sure we got a valid quality percentage
-                if not 0 < qualVal < 101:
-                    raise Exception("Invalid quality")
-
-                # Dont recompress input images that are less than this size
-                if self.inX * self.inY < minRecompressPixels:
-                    self.logger.debug("Not recompressing image: %s < %s" % 
-                        (self.inX * self.inY, 
-                        minRecompressPixels))
-                    qualVal=95
-
-            except Exception as e:
-                self.logger.error("Failed to set quality to '%s': %s" %
-                    (qualVal, e))
-
-        # Preserve our ICC profile (if our image supports it), unless 
-        # explicitly told otherwise
-        iccProf = None
-        if not noicc:
-            if 'icc_profile' in self.imIn.info:
-                self.logger.debug("Adding original ICC profile to %s" % 
-                    self.filePath)
-                iccProf = self.imIn.info.get('icc_profile')
+        # Preserve our ICC profile if this is a JPEG, unless explicitly
+        # requested otherwise
+        icc_prof = None
+        if self.in_fmt == "jpeg" and not noicc:
+            icc_prof = self.im_in.info.get("icc_profile")
 
         # Now write the converted image to a buffer
         try:
-            # set up our stringIO object, since PIL refuses to write
+            # set up our bytesIO object, since PIL refuses to write
             # directly to a string
-            self.outBuf = cStringIO.StringIO()
+            self.out_buf = io.BytesIO()
 
             # Our output arguments.  We have to to use a kwargs pointer, since
             # the save function will sometimes interpret the presence of
@@ -500,77 +525,123 @@ class dirpyImage: #############################################################
 
             # Bump up the ImageFile.MAXBLOCK size when writing optimized or
             # progressive images to avoid a legacy PIL bug
-            self.saveOpts["format"] = self.outFmt
+            self.save_opts["format"] = self.out_fmt
             if progressive or optimize:
                 ImageFile.MAXBLOCK =  max(
-                    self.origX * self.origY, 
-                    self.inX * self.inY, 2097152)
+                    self.orig_x * self.orig_y, 
+                    self.in_x * self.in_y, 2097152)
                 self.logger.debug("MAXBLOCK set to: %s" % ImageFile.MAXBLOCK)
             if optimize: 
-                self.saveOpts["optimize"] = True
+                self.save_opts["optimize"] = True
             if progressive: 
-                self.saveOpts["progressive"] = True
-            if iccProf is not None: 
-                self.saveOpts["icc_profile"] = iccProf
-            if qualVal is not None:
-                self.saveOpts["quality"] = qualVal
+                self.save_opts["progressive"] = True
+            if icc_prof is not None: 
+                self.save_opts["icc_profile"] = icc_prof
+            if qual_val is not None:
+                self.save_opts["quality"] = qual_val
 
-            # Save our image to the stringIO buffer, with all of our
+            # Save our image to the bytesIO buffer, with all of our
             # various user-defined or default config options
             # Note that any "failed to suspend" errors here are typically
             # caused by your MAXBLOCK variable being too small
             try:
-                self.imIn.save(self.outBuf, **self.saveOpts)
+                self.im_in.save(self.out_buf, **self.save_opts)
             except Exception as e:
-                raise dirpyFatalError("Failed to save image: %s" % e)
+                raise DirpyFatalError("Failed to save image: %s" % e)
 
+            # If we are being asked to write to disk, do so
+            if todisk_path:
 
-            # See to the end of the buffer so we can get our content
+                # Verify that the file doesn't exist on disk already and/or
+                # that we are allowed to overwrite it
+                if os.path.exists(todisk_path) and not cfg.allow_overwrite:
+                    raise DirpyUserError("Can't overwrite %s" % todisk_path)
+
+                # Make the subdirectory if necessary (and permitted)
+                this_dir = os.path.dirname(todisk_path)
+                if os.path.exists(this_dir):
+                    if not os.path.isdir(this_dir):
+                        raise DirpyUserError(
+                            "%s exists and is not a directory" % this_dir)
+                elif not cfg.allow_mkdir:
+                    raise DirpyUserError(
+                        "%s doesn't exist and allow_mkdir is False" % this_dir)
+                else:
+                    try:
+                        os.makedirs(this_dir)
+                    except OSError as e:
+                        if e.errno == errno.EEXIST and os.path.isdir(this_dir):
+                            pass
+                        else:
+                            raise DirpyFatalError(
+                                "Can't mkdir %s: %s" % (this_dir, e))
+
+                # Now write the BytesIO buffer to disk
+                try:
+                    self.logger.debug("Saving to disk at '%s'" % todisk_path)
+                    with open(todisk_path, 'w') as out_file:
+                        self.out_buf.seek(0,os.SEEK_SET)
+                        out_file.write(self.out_buf.read())
+                except Exception as e:
+                    raise DirpyFatalError("Can't save image to disk: %s" % e)
+
+            # If the user has requested "noshow", we don't want to return the
+            # image back to them (presumably because we have saved it to disk
+            # and that is all they care about, so we don't have to waste
+            # network overhead sending the image back to them)
+            if noshow:
+                logger.debug("Not showing %s, as requested" % self.file_path)
+                self.out_buf = io.BytesIO()
+
+            # Seek to the end of the buffer so we can get our content
             # size without allocating to a string (which we don't want
             # to do if this is a HEAD request).  Then seek back to the 
             # beginning so we can read the string later
-            self.outBuf.seek(0,os.SEEK_END)
-            self.outSize = self.outBuf.tell()
-            self.outBuf.seek(0)
+            self.out_buf.seek(0,os.SEEK_END)
+            self.out_size = self.out_buf.tell()
+            self.out_buf.seek(0)
 
-        except dirpyFatalError:
+
+        except DirpyFatalError:
+            raise
+        except DirpyUserError:
             raise
         except Exception as e:
-            raise dirpyFatalError("Error converting image '%s': %s" %
-                (self.filePath, e))
+            raise DirpyFatalError("Error converting image '%s': %s" %
+                (self.file_path, e))
 
 
     # Iterate through our options keys and see if any of them match the NxN 
     # pattern for image dimensions.  Dropping one of the two image dimensions 
     # is permitted (i.e. '640x480',' '640x' & 'x480' are all valid dimensions).
-    def _getReqDims(self, opts): #############################################
+    def _get_req_dims(self, opts): ############################################
 
         dims = []
 
-        for o in [ n for n in opts if 'x' in n]:
+        for o in [ n for n in opts if "x" in n]:
             try:
-                optDims = [None if x == "" else int(x) for x in o.split('x',3)]
+                opt_dims = [None if x == "" else int(x) for x in o.split("x",3)]
             except ValueError:
                 continue
 
             # Expand our final dimension array to be as large as the
             # one that we are currently inspecting
-            dims += [None]*(len(optDims)-len(dims))
+            dims += [None]*(len(opt_dims)-len(dims))
             
             # Iterate over each dimension in this list and make sure that we
             # haven't set it in a previous iteration
             for i in range(0, len(dims)):
-                if optDims[i] is not None:
+                if opt_dims[i] is not None:
                     if dims[i] is not None:
-                        raise dirpyUserError(
+                        raise DirpyUserError(
                             "Each dimension must be defined only once")
-                    dims[i] = optDims[i]
+                    dims[i] = opt_dims[i]
 
         # If we were able to find some dimensions in our options array,
-        # assign them to your reqDims classvar
+        # assign them to your req_dims classvar
         if len(dims) and dims != [None] * len(dims):
-            self.reqDims = dims + [None]*(2-len(dims))
-            self.numDims = len(dims)
+            self.req_dims = dims + [None]*(2-len(dims))
+            self.num_dims = len(dims)
             return True
 
         return False
@@ -578,126 +649,219 @@ class dirpyImage: #############################################################
 
     # Get the post-gravity adjusted dimensions.  These can be bigger or smaller
     # than the originally requested dimensions, 
-    def _getNewDims(self,opts): ###############################################
+    def _get_new_dims(self,opts): #############################################
 
         # Get our gravity, if any
         self.gravity = opts["gravity"] if "gravity" in opts else "c"
 
         # Check our gravity setting
         if self.gravity not in ("n","ne","e","se","s","sw","w","nw","c"):
-            raise dirpyUserError("Unknown gravity: %s" % self.gravity)
+            raise DirpyUserError("Unknown gravity: %s" % self.gravity)
 
-        newDims = [None, None, None, None]
+        new_dims = [None, None, None, None]
 
         # Account for requested dimensions with only a single value set
-        reqX = self.reqDims[0] or self.inX
-        reqY = self.reqDims[1] or self.inY
+        req_x = self.req_dims[0] or self.in_x
+        req_y = self.req_dims[1] or self.in_y
 
         # Now calculate dimensions based on gravity
         if "w" in self.gravity:
-            newDims[0] = 0
+            new_dims[0] = 0
         elif "e" in self.gravity:
-            newDims[0] = abs(self.inX - reqX)
+            new_dims[0] = abs(self.in_x - req_x)
         else:
-            newDims[0]  = abs(self.inX - reqX)/2
+            new_dims[0]  = abs(self.in_x - req_x)/2
 
         if "n" in self.gravity:
-            newDims[1] = 0
+            new_dims[1] = 0
         elif "s" in self.gravity:
-            newDims[1] = abs(self.inY - reqY)
+            new_dims[1] = abs(self.in_y - req_y)
         else:
-            newDims[1]  = abs(self.inY - reqY)/2
+            new_dims[1]  = abs(self.in_y - req_y)/2
 
-        newDims[2] = newDims[0] + min(reqX, self.inX)
-        newDims[3] = newDims[1] + min(reqY, self.inY)
+        new_dims[2] = new_dims[0] + min(req_x, self.in_x)
+        new_dims[3] = new_dims[1] + min(req_y, self.in_y)
 
-        return newDims
+        return new_dims
+
 
 # HTTP Result code w/ matching string
-class httpResult(): ##########################################################
-    codeNames = {
-        200: 'OK',
-        204: 'No Content',
-        301: 'Moved Permanently',
-        302: 'Found',
-        304: 'Not Modified',
-        400: 'Bad Request',
-        401: 'Unauthorized',
-        403: 'Forbidden',
-        404: 'Not Found',
-        405: 'Method Not Allowed',
-        500: 'Internal Server Error',
-        501: 'Not Implemented',
-        502: 'Bad Gateway',
-        503: 'Service Unavailable'
+class HttpResult(): ##########################################################
+    codes = {
+        200: "OK",
+        204: "No Content",
+        301: "Moved Permanently",
+        302: "Found",
+        304: "Not Modified",
+        400: "Bad Request",
+        401: "Unauthorized",
+        403: "Forbidden",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        500: "Internal Server Error",
+        501: "Not Implemented",
+        502: "Bad Gateway",
+        503: "Service Unavailable"
     }
 
-    def __init__(self, httpCode):
-        self.httpCode = httpCode
-        if httpCode in self.codeNames:
-            self.resultTxt = "%s %s" % (httpCode, self.codeNames[httpCode])
+    def __init__(self, http_code):
+        self.http_code = http_code
+        if http_code in self.codes:
+            self.resultTxt = "%s %s" % (http_code, self.codes[http_code])
         else:
-            self.resultTxt = str(httpCode)
+            self.resultTxt = str(http_code)
+
 
 # Base Dirpy Error class
-class dirpyError(Exception): ##################################################
-    def __init__(self, errStr, errCode=500):
-        self.errStr = errStr
-        self.errCode = errCode
+class DirpyError(Exception): ##################################################
+    def __init__(self, err_str, err_code=500):
+        self.err_str = err_str
+        self.err_code = err_code
 
     def __str__(self):
-        return self.errStr
+        return self.err_str
 
 
 # Dirpy Fatal Error class
-class dirpyFatalError(dirpyError): ############################################
+class DirpyFatalError(DirpyError): ############################################
     pass    
 
 
 # Dirpy User Error class
-class dirpyUserError(dirpyError): #############################################
+class DirpyUserError(DirpyError): #############################################
     pass
 
 
 # Result returned by DirpyWorker
-class dirpyResult(): ##########################################################
+class DirpyResult(): ##########################################################
 
-    def __init__(self, httpCode, errMsg=None, dirpyObj=None):
-        self.httpCode = httpCode
-        self.errMsg = errMsg
-        self.dirpyObj = dirpyObj
+    def __init__(self, http_code, err_msg=None, dirpy_obj=None):
+        self.http_code  = http_code
+        self.err_msg    = err_msg
+        self.dirpy_obj  = dirpy_obj
 
 
-# The dirpyWorker wrapper function called when running in standalone mode
-def httpWorker(req, head=False): ##############################################
+# Our HTTP Request handler class
+class HttpHandler(BaseHTTPServer.BaseHTTPRequestHandler): ####################
+
+    server_version = "Dirpy/" + __version__
+    protocol_version = "HTTP/1.1"
+
+    # Override log output (to stdout) and pass to our logger instance
+    def log_message(self, format, *args):
+        logger.debug("[%s] %s" % (
+            multiprocessing.current_process().name, format % args))
+
+    # Direct GET queries to http_worker
+    def do_GET(self):
+        http_worker(self)
+
+    # Direct HEAD queries to http_worker
+    def do_HEAD(self):
+        http_worker(self, method="HEAD")
+
+    # Direct POST queries to http_worker
+    def do_POST(self):
+        http_worker(self, method="POST")
+
+    # Gracefully handle session failures
+    def handle_one_request(self):
+        try:
+            BaseHTTPServer.BaseHTTPRequestHandler.handle_one_request(self)
+        except:
+            pass
+
+    # Gracefully handle disconnects
+    def finish(self,*args,**kw):
+        try:
+            if not self.wfile.closed:
+                self.wfile.flush()
+                self.wfile.close()
+        except Exception:
+            pass
+        self.rfile.close()
+
+
+# Our webserver class.  Implements timeouts
+class HttpTimeoutServer(BaseHTTPServer.HTTPServer): ##########################
+
+    # Extend the HTTPServer constructor, so we can grab our timeout at init
+    def __init__(self, server, handler, timeout=None):
+        self.timeout = timeout
+        BaseHTTPServer.HTTPServer.__init__(self, server, handler)
+
+    # Bind our server and set our socket timeout before we accept connects
+    def server_bind(self):
+        try:
+            BaseHTTPServer.HTTPServer.server_bind(self)
+            self.socket.settimeout(self.timeout)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) 
+        except Exception as e:
+            fatal("Failed to bind server: %s" % e)
+
+
+# Store POST data in a BytesIO object instead of a temp file
+class BytesIoStorage(cgi.FieldStorage):
+    def make_file(self, binary=None):
+        return io.BytesIO()
+
+
+# Encapsulate our POST data and file
+class PostData:
+    def _init_(self, fp, env):
+        self.form = BytesIoStorage(fq=fq, env=env)
+        if not self.form['file'].filename:
+            raise Excepton
+        self.file_data = self.form['file']
+        self.file_name = self.form['file'].filename
+            
+
+
+# The dirpy_worker wrapper function called when running in standalone mode
+def http_worker(req, method="GET"): ###########################################
 
     # Read request URI as defined by the BaseHTTPServer path
-    reqUriObj = urlparse.urlparse(req.path)
+    req_uri_obj = urlparse.urlparse(req.path)
+
+    # Read post data, if need be
+    if method == "POST":
+        try:
+            form = BytesIoStorage(
+                fp=req.rfile,
+                environ={'REQUEST_METHOD':'POST',
+                         'CONTENT_TYPE':req.headers['Content-Type'],
+                         })
+            req_post_data = form['file'].file
+        except Exception as e:
+            return req.send_error(400, "Failed to read POST data: %s" % e)
+    else:
+        req_post_data = None
 
     # Call the dirpy worker
-    result = dirpyWorker(reqUriObj)
+    result = dirpy_worker(req_uri_obj, req_post_data)
 
     # Throw an error if required
-    if result.httpCode == 204:
+    if result.http_code == 204:
         return req.send_response(204)
-    elif result.errMsg is not None:
-        return req.send_error(result.httpCode, result.errMsg)
+    elif result.err_msg is not None:
+        return req.send_error(result.http_code, result.err_msg)
 
     # Now fire off a response to our client
     req.send_response(200)
-    req.send_header("Content-Type", "image/%s" % result.dirpyObj.outFmt)
-    req.send_header("Content-Length", result.dirpyObj.outSize)
+    req.send_header("Content-Type", "image/%s" % result.dirpy_obj.out_fmt)
+    req.send_header("Content-Length", result.dirpy_obj.out_size)
     req.end_headers()
 
     # Don't send actual data if this is a HEAD request
-    if head:
+    if method == "HEAD":
         return
 
     # Guard against a broken TCP connection raising an exception
     # by wrapping the output buffer read/write loop in a try block
     try:
         while True:
-            buf = result.dirpyObj.outBuf.read(4096)
+            buf = result.dirpy_obj.out_buf.read(4096)
             if not buf:
                 break
             req.wfile.write(buf)
@@ -707,82 +871,97 @@ def httpWorker(req, head=False): ##############################################
     return
 
 
-# The dirpyWorker wrapper function called when running in uwsgi mode
+# The dirpy_worker wrapper function called when running in uwsgi mode
 def application(env, resp): ###################################################
 
     # Read request URI from the UWSGI environment variable
-    reqUriObj = urlparse.urlparse(env['REQUEST_URI'])
+    try:
+        req_uri_obj = urlparse.urlparse(env["REQUEST_URI"])
+    except Exception as e:
+        resp("400 Bad Request", [("Content-Type","text/html")])
+        return "Failure reading request data: %s" % e
 
+    # Handle POST data, if any
+    if "REQUEST_METHOD" in env and env["REQUEST_METHOD"].upper() == "POST":
+        try:        
+            form = BytesIoStorage(fp=env['wsgi.input'], environ=env)
+            req_post_data = form['file'].file
+        except Exception as e:
+            resp("400 Bad Request", [("Content-Type","text/html")])
+            return "Failure reading POST data: %s" % e
+    else:
+        req_post_data = None
+            
     # Call the dirpy worker
-    result = dirpyWorker(reqUriObj)
-    httpRes = httpResult(result.httpCode)
+    result = dirpy_worker(req_uri_obj, req_post_data)
+    http_res = HttpResult(result.http_code)
 
     # Throw an error if required
-    if result.httpCode == 204:
-        resp(httpRes.resultTxt, [('Content-Type','text/html')])
+    if result.http_code == 204:
+        resp(http_res.resultTxt, [("Content-Type","text/html")])
         return ""
-    elif result.errMsg is not None:
-        resp(httpRes.resultTxt, [('Content-Type','text/html')])
-        return result.errMsg
+    elif result.err_msg is not None:
+        resp(http_res.resultTxt, [("Content-Type","text/html")])
+        return result.err_msg
 
     # Now fire off a response to our client
-    resp('200 OK', [
-        ("Content-Type", "image/%s" % result.dirpyObj.outFmt),
-        ("Content-Length", str(result.dirpyObj.outSize)) ]
+    resp("200 OK", [
+        ("Content-Type", "image/%s" % result.dirpy_obj.out_fmt),
+        ("Content-Length", str(result.dirpy_obj.out_size)) ]
     )
 
-    if result.dirpyObj.outBuf is not None:
-        return result.dirpyObj.outBuf.read()
+    if result.dirpy_obj.out_buf is not None:
+        return result.dirpy_obj.out_buf.read()
 
     return ""
     
 
 # Our dirpy function.  This is where all the heavy lifting is done
-def dirpyWorker(reqUriObj): ##################################################
+def dirpy_worker(req_uri_obj, req_post_data): ################################
 
     # Extract relative file path from request URI object
-    filePath = reqUriObj.path
+    file_path = req_uri_obj.path
 
     # Ignore favicons
-    if filePath == "/favicon.ico":
-        return dirpyResult(204)
+    if file_path == "/favicon.ico":
+        return DirpyResult(204)
 
     # Non-positional arguments
     args = { "load": {}, "save": {} }
 
     # Positional-based commands
-    cmds = getCmds(reqUriObj, args)
+    cmds = get_cmds(req_uri_obj, args)
 
     # Instatiate our dirpy image object
-    dirpyObj = dirpyImage(cfg.httpRoot)
+    dirpy_obj = DirpyImage(cfg.http_root)
 
     # Catch dirpy-related errors
     try:
         # Load our image
-        dirpyObj.load(filePath, args["load"], cfg.maxPixels)
+        dirpy_obj.load(args["load"], file_path, req_post_data)
 
         # Now run our requested commands & options against the dirpy image
         for cmd, opts in cmds:
-            dirpyObj.run(cmd, opts)
+            dirpy_obj.run(cmd, opts)
 
         # Now save it to an output buffer
-        dirpyObj.save(args["save"], cfg.defQuality, cfg.minRecompressPixels)
+        dirpy_obj.save(args["save"])
 
-    except dirpyFatalError as e:
+    except DirpyFatalError as e:
         logger.warning(str(e))
-        return dirpyResult(e.errCode, "Fatal Dirpy Error")
-    except dirpyUserError as e:
+        return DirpyResult(e.err_code, "Fatal Dirpy Error")
+    except DirpyUserError as e:
         logger.debug(str(e))
-        return dirpyResult(e.errCode, e.errStr)
+        return DirpyResult(e.err_code, e.err_str)
     except Exception as e:
         logger.warning(traceback.format_exc())
-        return dirpyResult(503, "Uncaught Dirpy Error")
+        return DirpyResult(503, "Uncaught Dirpy Error")
 
-    return dirpyResult(200, None, dirpyObj)
+    return DirpyResult(200, None, dirpy_obj)
 
 
 # Read in the command line and file based configuration parameters
-def readConfig(uwsgiCfg=None): ###############################################
+def read_config(uwsgi_cfg=None): ##############################################
 
     # Build our config parser
     parser = argparse.ArgumentParser(
@@ -799,47 +978,59 @@ def readConfig(uwsgiCfg=None): ###############################################
     cfg = parser.parse_args()
 
     # Config file precedence: 
-    # uwsgiCfg >> cfg.config_file >> "/etc/dirpy.conf" 
-    # If a user-defined config file (i.e. uwsgiCfg or cfg.config_file) is
+    # uwsgi_cfg >> cfg.config_file >> "/etc/dirpy.conf" 
+    # If a user-defined config file (i.e. uwsgi_cfg or cfg.config_file) is
     # defined but not exist, we should throw a fatal error
-    cfgFile = uwsgiCfg or cfg.config_file or "/etc/dirpy.conf"
-    cfgParser = ConfigParser.RawConfigParser()
+    cfg_file = uwsgi_cfg or cfg.config_file or "/etc/dirpy.conf"
+    cfg_parser = ConfigParser.RawConfigParser()
     try:
-        if cfgParser.read(cfgFile):
+        if cfg_parser.read(cfg_file):
             cfg.defaults = False
         else:
             cfg.defaults = True
     except Exception as e:
-        fatal("Unable to load config file '%s': %s" % (cfgFile, e))
+        fatal("Unable to load config file '%s': %s" % (cfg_file, e))
 
     # Read in all of our global / default options
-    cfg.pidFile     = cfgStr(cfgParser,
-        'global', 'pidFile', False, '/var/run/dirpy.pid')
-    cfg.logFile     = cfgStr(cfgParser,
-        'global', 'logFile', False, '/var/log/dirpy.log')
-    cfg.bindAddr    = cfgStr(cfgParser,
-        'global', 'bindAddr', False,  '0.0.0.0')
-    cfg.bindPort    = cfgInt(cfgParser,
-        'global', 'bindPort', False,  3000)
-    cfg.httpRoot    = cfgStr(cfgParser,
-        'global', 'httpRoot', False,  '/var/www/html')
-    cfg.numWorkers  = cfgInt(cfgParser,
-        'global', 'numworkers', False,  multiprocessing.cpu_count()*2)
-    cfg.maxPixels   = cfgInt(cfgParser,
-        'global', 'maxPixels', False,  90000000)
-    cfg.defQuality  = cfgInt(cfgParser,
-        'global', 'defQuality', False,  95)
-    cfg.minRecompressPixels  = cfgInt(cfgParser,
-        'global', 'minRecompressPixels', False,  0)
-    cfg.reqTimeout = cfgInt(cfgParser,
-        'global', 'reqTimeout', False, None)
-    cfg.debug      = cfgBool(cfgParser,
-        'global', 'debug', cfg.debug, None)
+    cfg.pid_file     = cfg_str(cfg_parser,
+        "global", "pid_file", False, "/var/run/dirpy.pid")
+    cfg.log_file     = cfg_str(cfg_parser,
+        "global", "log_file", False, "/var/log/dirpy.log")
+    cfg.log_max_line = cfg_int(cfg_parser,
+        "global", "log_max_line", False, 300)
+    cfg.bind_addr    = cfg_str(cfg_parser,
+        "global", "bind_addr", False,  "0.0.0.0")
+    cfg.bind_port    = cfg_int(cfg_parser,
+        "global", "bind_port", False,  3000)
+    cfg.http_root    = cfg_str(cfg_parser,
+        "global", "http_root", False,  "/var/www/html")
+    cfg.num_workers  = cfg_int(cfg_parser,
+        "global", "num_workers", False,  multiprocessing.cpu_count()*2)
+    cfg.max_pixels   = cfg_int(cfg_parser,
+        "global", "max_pixels", False,  90000000)
+    cfg.def_quality  = cfg_int(cfg_parser,
+        "global", "def_quality", False,  95)
+    cfg.min_recompress_pixels  = cfg_int(cfg_parser,
+        "global", "min_recompress_pixels", False,  0)
+    cfg.req_timeout  = cfg_int(cfg_parser,
+        "global", "req_timeout", False, None)
+    cfg.allow_post   = cfg_bool(cfg_parser,
+        "global", "allow_post", False,  False)
+    cfg.allow_todisk  = cfg_bool(cfg_parser,
+        "global", "allow_todisk", False, False)
+    cfg.allow_mkdir  = cfg_bool(cfg_parser,
+        "global", "allow_mkdir", False, False)
+    cfg.allow_overwrite  = cfg_bool(cfg_parser,
+        "global", "allow_overwrite", False, False)
+    cfg.todisk_root  = cfg_str(cfg_parser,
+        "global", "todisk_root", False,  "")
+    cfg.debug        = cfg_bool(cfg_parser,
+        "global", "debug", False, cfg.debug)
 
 
 # Extract dirpy arguments and positional commands/options from the
 # parsed query string
-def getCmds(parsedPath, args): ###############################################
+def get_cmds(parsedPath, args): ##############################################
     
     # Now parse the query string and turn it into our command/option data
     # structure.  This should allow for commands and their options to be
@@ -851,20 +1042,20 @@ def getCmds(parsedPath, args): ###############################################
 
     cmds = []
 
-    for fvPair in parsedPath.query.split("&"):
-        fvNorm = urllib.unquote(fvPair).decode("utf-8").lower()
+    for fv_pair in parsedPath.query.split("&"):
+        fv_norm = urllib.unquote(fv_pair).decode("utf-8").lower()
         oper = None
         opts = {}
-        if "=" in fvPair:
-            oper, allOpts = fvNorm.split("=",1)
-            for optStr in allOpts.split(","):
-                if ":" in optStr:
-                    optPair = optStr.split(":",1)
-                    opts[optPair[0]] = optPair[1]
+        if "=" in fv_pair:
+            oper, all_opts = fv_norm.split("=",1)
+            for opt_str in all_opts.split(","):
+                if ":" in opt_str:
+                    opt_pair = opt_str.split(":",1)
+                    opts[opt_pair[0]] = opt_pair[1]
                 else:
-                    opts[optStr] = True
+                    opts[opt_str] = True
         else:
-            oper, opts = fvNorm, {}
+            oper, opts = fv_norm, {}
 
         if oper in args:
             args[oper] = opts
@@ -876,7 +1067,7 @@ def getCmds(parsedPath, args): ###############################################
 
 
 # Grab an string from our config
-def cfgStr(cfg, section, name, required=True, default=None): #################
+def cfg_str(cfg, section, name, required=True, default=None): #################
     try:
         return cfg.get(section, name)
     except ConfigParser.Error:
@@ -886,7 +1077,7 @@ def cfgStr(cfg, section, name, required=True, default=None): #################
 
 
 # Grab an int from our config, complain if it isn't valid
-def cfgInt(cfg, section, name, required=True, default=None): ################
+def cfg_int(cfg, section, name, required=True, default=None): ################
     try:
         # Allow a string if they match the default value
         return cfg.getint(section, name)
@@ -897,8 +1088,9 @@ def cfgInt(cfg, section, name, required=True, default=None): ################
             return default
         fatal("Missing required config parameter %s:%s." % (section, name))
 
+
 # Grab an int from our config, complain if it isn't valid
-def cfgBool(cfg, section, name, required=True, default=False): ################
+def cfg_bool(cfg, section, name, required=True, default=False): ################
     try:
         # Allow a string if they match the default value
         return cfg.getboolean(section, name)
@@ -911,7 +1103,7 @@ def cfgBool(cfg, section, name, required=True, default=False): ################
 
 
 # Grab an network address from our config, complain if it isn't valid
-def cfgAddr(cfg, section, name, required=True, default=None): ################
+def cfg_addr(cfg, section, name, required=True, default=None): ################
     # Fetch and validate a hostname/ip address config option
     try:
         addr = cfg.get(section, name)
@@ -925,8 +1117,20 @@ def cfgAddr(cfg, section, name, required=True, default=None): ################
         fatal("Invalid address for config parameter %s:%s" % (section, name))
 
 
+# Make outgoing log messages printable and enforce a maximum line length
+class DirpyLogFilter(logging.Filter):
+    def __init__(self, log_max_line):
+        self.log_max_line = log_max_line
+    def filter(self, rec):
+        rec.msg = rec.msg.encode('unicode_escape')
+        if len(rec.msg) > self.log_max_line:
+            rec.msg = rec.msg[:self.log_max_line-3] + "..."
+
+        return True
+        
+
 # Set up our global logger
-def loggerSetup(): ###########################################################
+def logger_setup(): ###########################################################
 
     # Set our maximum severity level to log (i.e. debug or not)
     logLevel = logging.DEBUG if cfg.debug else logging.INFO
@@ -934,9 +1138,9 @@ def loggerSetup(): ###########################################################
         logFh = sys.stdout
     else:
         try:
-            logFh = open(cfg.logFile, 'a')
+            logFh = open(cfg.log_file, "a")
         except IOError as e:
-            fatal("Unable to log to %s (%s)" % (cfg.logFile, e.strerror))
+            fatal("Unable to log to %s (%s)" % (cfg.log_file, e.strerror))
 
     logging.basicConfig(
         stream=logFh,
@@ -947,6 +1151,8 @@ def loggerSetup(): ###########################################################
 
     global logger
     logger = logging.getLogger("dirpy")
+    log_filter = DirpyLogFilter(cfg.log_max_line)
+    logger.addFilter(log_filter)
 
     # Make the logger emit all unhandled exceptions
     # sys.excepthook = lambda t, v, x: logger.exception(str(v))
@@ -1016,65 +1222,8 @@ def daemonize(): #############################################################
     return
 
 
-# Our HTTP Request handler class
-class httpHandler(BaseHTTPServer.BaseHTTPRequestHandler): ####################
-
-    server_version = "Dirpy/" + __version__
-    protocol_version = "HTTP/1.1"
-
-    # Override log output (to stdout) and pass to our logger instance
-    def log_message(self, format, *args):
-        logger.debug('[%s] %s' % (
-            multiprocessing.current_process().name, format % args))
-
-    # Direct GET queries to
-    def do_GET(self):
-        httpWorker(self)
-
-    # Direct GET queries to
-    def do_HEAD(self):
-        httpWorker(self, head=True)
-
-    # Gracefully handle session failures
-    def handle_one_request(self):
-        try:
-            BaseHTTPServer.BaseHTTPRequestHandler.handle_one_request(self)
-        except:
-            pass
-
-    # Gracefully handle disconnects
-    def finish(self,*args,**kw):
-        try:
-            if not self.wfile.closed:
-                self.wfile.flush()
-                self.wfile.close()
-        except Exception:
-            pass
-        self.rfile.close()
-
-
-# Our webserver class.  Implements timeouts
-class httpTimeoutServer(BaseHTTPServer.HTTPServer): ##########################
-
-    # Extend the HTTPServer constructor, so we can grab our timeout at init
-    def __init__(self, server, handler, timeout=None):
-        self.timeout = timeout
-        BaseHTTPServer.HTTPServer.__init__(self, server, handler)
-
-    # Bind our server and set our socket timeout before we accept connects
-    def server_bind(self):
-        try:
-            BaseHTTPServer.HTTPServer.server_bind(self)
-            self.socket.settimeout(self.timeout)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) 
-        except Exception as e:
-            fatal("Failed to bind server: %s" % e)
-
-
-
 # Spawn a worker process, along with the time that it was started
-def spawnWorker(target, args): ##############################################
+def spawn_worker(target, args): ##############################################
 
     # Try three times to start a worker, and then give up
     attempts = 3
@@ -1097,7 +1246,7 @@ def spawnWorker(target, args): ##############################################
 
 
 # The serve_forever wrapper, called by multiprocessing.Process
-def serverWrapper(server):
+def server_wrapper(server):
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -1108,14 +1257,14 @@ def serverWrapper(server):
 if __name__ == "__main__":
 
     # Read command line parameters and config file
-    readConfig()
+    read_config()
 
     # Daemonize, unless requested otherwise
     if not cfg.foreground:
         daemonize()
 
     # Start our logger
-    loggerSetup()
+    logger_setup()
 
     # Catch SIGINTs
     signal.signal(signal.SIGINT, lambda s, f: os._exit(1))
@@ -1123,38 +1272,38 @@ if __name__ == "__main__":
     # Drop our pid file if we are daemonized
     if not cfg.foreground:
         try:
-            with open(cfg.pidFile, 'w') as fh:
+            with open(cfg.pid_file, "w") as fh:
                 fh.write(str(os.getpid()))
         except IOError as e:
-            fatal("Unable to write to pidfile %s (%s)" % (cfg.pidFile, e))
+            fatal("Unable to write to pidfile %s (%s)" % (cfg.pid_file, e))
 
     # Initialize our http server class
-    httpServer = httpTimeoutServer(
-        (cfg.bindAddr, cfg.bindPort), httpHandler, cfg.reqTimeout)
+    http_server = HttpTimeoutServer(
+        (cfg.bind_addr, cfg.bind_port), HttpHandler, cfg.req_timeout)
 
     # Start our worker pool.  We dont use multiprocessing.pool, since we want
     # to be able to watchdog our server processes
     workers = []
-    for i in range(cfg.numWorkers):
-        workers.append(spawnWorker(serverWrapper, (httpServer,)))
+    for i in range(cfg.num_workers):
+        workers.append(spawn_worker(server_wrapper, (http_server,)))
 
     # We're up and running; let the world know about it
     logger.info("Dirpy daemon started! Herp da dirp!")
     logger.info("Listing on %s:%s, using %s worker(s) " %
-        (cfg.bindAddr, cfg.bindPort, cfg.numWorkers))
+        (cfg.bind_addr, cfg.bind_port, cfg.num_workers))
 
     # Enter watchdog mode
     while True:
         time.sleep(1)
         
         # Check to see if any workers have died/exited unexpectedly
-        for i in range(cfg.numWorkers):
+        for i in range(cfg.num_workers):
 
             # If a worker exited; clean up after it and then restart it
             if not workers[i][0].is_alive():
                 logger.error("Worker %s died; restarting it." % i+1)
                 workers[i][0].join()
-                workers[i] = spawnWorker(serverWrapper, (httpServer,))
+                workers[i] = spawn_worker(server_wrapper, (http_server,))
 
     # Shouldn't ever get this far, but just in case...
     sys.exit(1)
@@ -1166,11 +1315,11 @@ if sys.argv and sys.argv[0] == "uwsgi":
     import uwsgi
 
     # Read command line args
-    if 'dirpy_cfg' in uwsgi.opt:
-        readConfig(uwsgi.opt['dirpy_cfg'])
+    if "dirpy_cfg" in uwsgi.opt:
+        read_config(uwsgi.opt["dirpy_cfg"])
     else:
-        readConfig()
+        read_config()
 
     # Set up our logger
-    loggerSetup()
+    logger_setup()
 
