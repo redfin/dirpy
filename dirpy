@@ -1301,7 +1301,7 @@ if __name__ == "__main__":
 
             # If a worker exited; clean up after it and then restart it
             if not workers[i][0].is_alive():
-                logger.error("Worker %s died; restarting it." % i+1)
+                logger.error("Worker %s died; restarting it." % (i+1,))
                 workers[i][0].join()
                 workers[i] = spawn_worker(server_wrapper, (http_server,))
 
