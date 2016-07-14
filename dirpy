@@ -1043,7 +1043,7 @@ def get_cmds(parsedPath, args): ##############################################
     cmds = []
 
     for fv_pair in parsedPath.query.split("&"):
-        fv_norm = urllib.unquote(fv_pair).decode("utf-8").lower()
+        fv_norm = urllib.unquote(fv_pair).decode("utf-8")
         oper = None
         opts = {}
         if "=" in fv_pair:
