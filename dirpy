@@ -502,7 +502,7 @@ class DirpyImage: #############################################################
         else:
             qual_val = None
 
-        # Handle pallette-style transparency
+        # Handle palette-style transparency
         if self.out_fmt in ("gif"):
             if self.trans is not None:
                 self.save_opts["transparency"] = 0
@@ -512,6 +512,11 @@ class DirpyImage: #############################################################
         icc_prof = None
         if self.in_fmt == "jpeg" and not noicc:
             icc_prof = self.im_in.info.get("icc_profile")
+
+        # Convert palette mode to RGB, if this is a jpeg, since JPEG 
+        # doesn't support mode P
+        if self.out_fmt == "jpeg" and self.im_in.mode == "P":
+            self.im_in = self.im_in.convert("RGB")
 
         # Now write the converted image to a buffer
         try:
