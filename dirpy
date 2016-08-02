@@ -36,6 +36,7 @@ class DirpyImage: #############################################################
         self.out_size       = 0
         self.save_opts      = {}
         self.trans          = None
+        self.modified       = False
         self.http_root      = http_root
 
     # Run a command, provided that it is value
@@ -225,9 +226,11 @@ class DirpyImage: #############################################################
         try:
             if not shrink and resize_ratio > 1:
                 self.im_in = self.im_in.resize((new_x, new_y), filter_type)
+                self.modified = True
             elif not grow and resize_ratio < 1:
                 self.im_in.draft(None,(new_x,new_y))
                 self.im_in = self.im_in.resize((new_x, new_y), filter_type)
+                self.modified = True
             self.in_x, self.in_y = self.im_in.size
         except Exception as e:
             raise DirpyFatalError("Error resizing: %s" % e)
@@ -335,6 +338,7 @@ class DirpyImage: #############################################################
             self.im_in = self.im_in.crop(new_dims)
             self.im_in.load()
             self.in_x, self.in_y = self.im_in.size
+            self.modified = True
         except Exception as e:
             raise DirpyFatalError("Error cropping: %s" % e)
 
@@ -403,6 +407,7 @@ class DirpyImage: #############################################################
 
             self.im_in = im_pad
             self.in_x, self.in_y = self.im_in.size
+            self.modified = True
         except Exception as e:
             raise DirpyFatalError(
                 "Error padding image %s: %s" % (self.file_path,e))
@@ -439,6 +444,7 @@ class DirpyImage: #############################################################
         try:
             self.im_in = self.im_in.transpose(method)
             self.in_x, self.in_y = self.im_in.size
+            self.modified = True
         except Exception as e:
             raise DirpyFatalError(
                 "Error transposing image %s: %s" % (self.file_path,e))
@@ -517,6 +523,13 @@ class DirpyImage: #############################################################
         # doesn't support mode P
         if self.out_fmt == "jpeg" and self.im_in.mode == "P":
             self.im_in = self.im_in.convert("RGB")
+
+        # Maintain the encoder subsampling to prevent jpeg->jpeg size bloat
+        # (although this only works on un-modified images)
+        if self.in_fmt == self.out_fmt == "jpeg" and not self.modified:
+            self.im_in.format = "JPEG"
+            qual_val = "keep"
+            self.logger.debug("Preventing JPEG recompression.")
 
         # Now write the converted image to a buffer
         try:
