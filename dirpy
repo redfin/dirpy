@@ -1163,7 +1163,7 @@ def logger_setup(): ###########################################################
     logging.basicConfig(
         stream=logFh,
         level=logLevel,
-        format="%(asctime)s %(levelname)s: %(message)s",
+        format="%(asctime)s %(levelname)s: [%(process)d] %(message)s",
         datefmt="[%Y-%m-%d@%H:%M:%S]"
     )
 
