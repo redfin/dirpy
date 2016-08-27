@@ -1,0 +1,15 @@
+[Unit]
+Description=Dirpy image resizer
+After=syslog.target
+
+[Service]
+ExecStart=/usr/bin/dirpy 
+Restart=always
+KillSignal=SIGQUIT
+Type=notify
+StandardError=syslog
+NotifyAccess=all
+
+[Install]
+WantedBy=multi-user.target
+

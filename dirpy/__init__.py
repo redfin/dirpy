@@ -1,17 +1,39 @@
-#!/platform/python/bin/python
+__version__ = "0.5"
 
-__version__ = "0.4"
+import argparse
+import cgi
+import datetime
+import errno
+import io
+import logging
+import multiprocessing
+import os
+import re
+import signal
+import socket
+import sys
+import time
+import traceback
+import urllib
 
-import os, sys, datetime, time, ConfigParser, argparse, logging, signal
-import multiprocessing, socket, BaseHTTPServer, urllib, urllib2, urlparse
-import io, errno, traceback, re, cgi, errno
+# Python2/3 module disambiguation
+if sys.version[0] == '3':
+    import configparser
+    import http.server as http_server
+    import urllib.request as urllib2
+    import urllib.parse as urlparse
+else:
+    import ConfigParser as configparser
+    import BaseHTTPServer as http_server
+    import urllib2
+    import urlparse
 
 # Gracefully exit if PIL is missing
 try:
     from PIL import Image, ImageFile, ImageColor, ImageChops, ImageDraw
 except:
-    print ("Missing the PIL module; please consult the README.md " +
-        "file for instructions on how to install PIL.")
+    print("Missing the PIL module; consult https://github.com/redfin/dirpy " +
+        "for instructions on how to install PIL.")
     sys.exit(1)
 
 # Workaround for truncated images
@@ -19,7 +41,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # The dirpy image class.  Defines the various operations that can be performed
 # on images loaded by dirpy
-class DirpyImage: #############################################################
+class DirpyImage: ############################################################
 
     def __init__(self, http_root):
         self.logger         = logging.getLogger("dirpy")
@@ -52,7 +74,7 @@ class DirpyImage: #############################################################
         
 
     # Load an image file, either from disk or a local HTTP(S) server
-    def load(self, opts, rel_file, req_post_data): ############################
+    def load(self, opts, rel_file, req_post_data): ###########################
 
         # A file-like object to store the result of our BytesIO
         # output (in the event of a proxied result) or the contents
@@ -124,7 +146,8 @@ class DirpyImage: #############################################################
     # Resize an image
     def resize(self, opts): ##################################################
 
-        self.logger.debug("Resizing image %s: %s" % (self.file_path, str(opts)))
+        self.logger.debug(
+            "Resizing image %s: %s" % (self.file_path, str(opts)))
 
         # Fetch our percentage resize value (if any)
         try:
@@ -144,14 +167,14 @@ class DirpyImage: #############################################################
         fill        = "fill" in opts            # use smaller dim. as limit
         shrink      = "shrink" in opts          # only shrink images
         grow        = "grow" in opts            # only grow images
-        landscape   = "landscape" in opts       # size images in landscape mode
-        portrait    = "portrait" in opts        # size images in portrait mode
+        landscape   = "landscape" in opts       # resize using landscape mode
+        portrait    = "portrait" in opts        # resize using portrait mode
 
         # Determine if we have any missing or conflicting options
         if not (req_x or req_y or pct):
             raise DirpyUserError("Need height and/or width or pct for resize")
         if dim_set and pct:
-            raise DirpyUserError("Height/width and pct are mutually exclusive") 
+            raise DirpyUserError("Height/width & pct are mutually exclusive")
         if unlock + fill + landscape + portrait > 1:
             raise DirpyUserError("Unlock/fill/landscape/portrait " 
                 "are mutually exclusive")
@@ -219,7 +242,8 @@ class DirpyImage: #############################################################
         if new_y is None:
             new_y = int(self.in_y * resize_ratio)
 
-        self.logger.debug("Resize: in_x=%s in_y=%s new_x=%s new_y=%s ratio=%s" %
+        self.logger.debug(
+            "Resize: in_x=%s in_y=%s new_x=%s new_y=%s ratio=%s" %
             (self.in_x, self.in_y, new_x, new_y, resize_ratio))
 
         # Now do the actual resize
@@ -237,9 +261,10 @@ class DirpyImage: #############################################################
 
 
     # Crop an image
-    def crop(self, opts): #####################################################
+    def crop(self, opts): ####################################################
 
-        self.logger.debug("Cropping image %s: %s" % (self.file_path, str(opts)))
+        self.logger.debug("Cropping image %s: %s" 
+            % (self.file_path, str(opts)))
 
         # Make sure that we have an appropriate dimension set
         self._get_req_dims(opts)
@@ -257,8 +282,8 @@ class DirpyImage: #############################################################
                         raise Exception
                 except:
                     raise DirpyUserError(
-                        "Crop fuzz must be an integer between 0 and 255: %s" %
-                        opts["border"])
+                        "Crop fuzz must be an integer between 0 and 255: %s"
+                        % opts["border"])
 
             # Do an image channel difference, and then get the bounding box
             # to determine where the border is
@@ -282,7 +307,7 @@ class DirpyImage: #############################################################
 
         # Handle gravity crop (i.e. a dimension-based crop)
         elif self.num_dims == 2:
-            # Unlike coordinate-based cropping, we correct crop boundaries that
+            # Unlike coordinate-based cropping, we correct crop boundaries 
             # outside our image boundary, as we can inherit crop dimensions
             # from previous commands which may have shrank the image 
             # boundary below the specified dimensions
@@ -294,7 +319,8 @@ class DirpyImage: #############################################################
 
             # Don't bother cropping if our image is the same size as our
             # requested crop size
-            if self.req_dims[1] == self.in_y and self.req_dims[0] == self.in_x:
+            if (self.req_dims[1] == self.in_y 
+                    and self.req_dims[0] == self.in_x):
                 return
 
             new_dims = self._get_new_dims(opts)
@@ -344,9 +370,10 @@ class DirpyImage: #############################################################
 
 
     # Pad an image
-    def pad(self, opts): ######################################################
+    def pad(self, opts): #####################################################
 
-        self.logger.debug("Padding image %s: %s" % (self.file_path, str(opts)))
+        self.logger.debug("Padding image %s: %s" 
+            % (self.file_path, str(opts)))
 
         # Make sure that we have an appropriate dimension set
         self._get_req_dims(opts)
@@ -400,7 +427,8 @@ class DirpyImage: #############################################################
             im_pad.paste(self.im_in, new_dims)
 
             if self.trans is not None:
-                mask_dims=(new_dims[0],new_dims[1],new_dims[2]-1,new_dims[3]-1)
+                mask_dims=(
+                    new_dims[0], new_dims[1], new_dims[2]-1, new_dims[3]-1)
                 im_mask = Image.new('L', self.req_dims, color=self.trans)
                 ImageDraw.Draw(im_mask).rectangle(mask_dims, fill=255)
                 im_pad.putalpha(im_mask)
@@ -413,9 +441,10 @@ class DirpyImage: #############################################################
                 "Error padding image %s: %s" % (self.file_path,e))
 
     # Transpose an image
-    def transpose(self, opts): ################################################
+    def transpose(self, opts): ###############################################
 
-        self.logger.debug("Transposing image %s: %s" % (self.file_path, str(opts)))
+        self.logger.debug("Transposing image %s: %s" 
+            % (self.file_path, str(opts)))
 
 
         # Parse possible arguments
@@ -452,7 +481,7 @@ class DirpyImage: #############################################################
 
 
     # Write an image to a BytesIO output buffer
-    def save(self, opts): #####################################################
+    def save(self, opts): ####################################################
 
         self.logger.debug("Saving image %s: %s" % (self.file_path, str(opts)))
 
@@ -466,9 +495,11 @@ class DirpyImage: #############################################################
         # (and if we are permitted to)
         if "todisk" in opts:
             if not cfg.allow_todisk:
-                raise DirpyUserError("Saving to disk forbidden: %s" % str(opts))
+                raise DirpyUserError(
+                    "Saving to disk forbidden: %s" % str(opts))
             if not cfg.todisk_root:
-                raise DirpyUserError("Save to disk path unset: %s" % str(opts))
+                raise DirpyUserError(
+                    "Save to disk path unset: %s" % str(opts))
             todisk_path = os.path.normpath(cfg.todisk_root +
                 os.path.normpath("/" + opts["todisk"]))
         else:
@@ -490,7 +521,10 @@ class DirpyImage: #############################################################
         # Set output quality (only affects jpeg/webp formats)
         if self.out_fmt in ("jpeg", "webp"):
             try:
-                qual_val = int(opts["qual"]) if "qual" in opts else cfg.def_quality
+                if "qual" in opts:
+                    qual_val = int(opts["qual"])
+                else:
+                    qual_val = cfg.def_quality
             except:
                 raise DirpyUserError("Quality must be an integer")
 
@@ -508,7 +542,7 @@ class DirpyImage: #############################################################
         else:
             qual_val = None
 
-        # Handle palette-style transparency
+        # Handle pallette-style transparency
         if self.out_fmt in ("gif"):
             if self.trans is not None:
                 self.save_opts["transparency"] = 0
@@ -519,7 +553,7 @@ class DirpyImage: #############################################################
         if self.in_fmt == "jpeg" and not noicc:
             icc_prof = self.im_in.info.get("icc_profile")
 
-        # Convert palette mode to RGB, if this is a jpeg, since JPEG 
+        # Convert pallette mode to RGB, if this is a jpeg, since JPEG 
         # doesn't support mode P
         if self.out_fmt == "jpeg" and self.im_in.mode == "P":
             self.im_in = self.im_in.convert("RGB")
@@ -537,7 +571,7 @@ class DirpyImage: #############################################################
             # directly to a string
             self.out_buf = io.BytesIO()
 
-            # Our output arguments.  We have to to use a kwargs pointer, since
+            # Our output arguments.  We have to to use a kwargs pointer, as
             # the save function will sometimes interpret the presence of
             # an argument (regardless of its value) to mean a true value
 
@@ -583,12 +617,14 @@ class DirpyImage: #############################################################
                             "%s exists and is not a directory" % this_dir)
                 elif not cfg.allow_mkdir:
                     raise DirpyUserError(
-                        "%s doesn't exist and allow_mkdir is False" % this_dir)
+                        "%s doesn't exist and allow_mkdir is False" 
+                        % this_dir)
                 else:
                     try:
                         os.makedirs(this_dir)
                     except OSError as e:
-                        if e.errno == errno.EEXIST and os.path.isdir(this_dir):
+                        if (e.errno == errno.EEXIST 
+                                and os.path.isdir(this_dir)):
                             pass
                         else:
                             raise DirpyFatalError(
@@ -610,6 +646,7 @@ class DirpyImage: #############################################################
             if noshow:
                 logger.debug("Not showing %s, as requested" % self.file_path)
                 self.out_buf = io.BytesIO()
+                
 
             # Seek to the end of the buffer so we can get our content
             # size without allocating to a string (which we don't want
@@ -631,29 +668,29 @@ class DirpyImage: #############################################################
 
     # Iterate through our options keys and see if any of them match the NxN 
     # pattern for image dimensions.  Dropping one of the two image dimensions 
-    # is permitted (i.e. '640x480',' '640x' & 'x480' are all valid dimensions).
-    def _get_req_dims(self, opts): ############################################
+    # is permitted (i.e. '640x480',' '640x' & 'x480' are valid dimensions).
+    def _get_req_dims(self, opts): ###########################################
 
         dims = []
 
         for o in [ n for n in opts if "x" in n]:
             try:
-                opt_dims = [None if x == "" else int(x) for x in o.split("x",3)]
+                o_dims = [None if x == "" else int(x) for x in o.split("x",3)]
             except ValueError:
                 continue
 
             # Expand our final dimension array to be as large as the
             # one that we are currently inspecting
-            dims += [None]*(len(opt_dims)-len(dims))
+            dims += [None]*(len(o_dims)-len(dims))
             
             # Iterate over each dimension in this list and make sure that we
             # haven't set it in a previous iteration
             for i in range(0, len(dims)):
-                if opt_dims[i] is not None:
+                if o_dims[i] is not None:
                     if dims[i] is not None:
                         raise DirpyUserError(
                             "Each dimension must be defined only once")
-                    dims[i] = opt_dims[i]
+                    dims[i] = o_dims[i]
 
         # If we were able to find some dimensions in our options array,
         # assign them to your req_dims classvar
@@ -665,9 +702,9 @@ class DirpyImage: #############################################################
         return False
 
 
-    # Get the post-gravity adjusted dimensions.  These can be bigger or smaller
-    # than the originally requested dimensions, 
-    def _get_new_dims(self,opts): #############################################
+    # Get the post-gravity adjusted dimensions.  These can be bigger or 
+    # smaller than the originally requested dimensions, 
+    def _get_new_dims(self,opts): ############################################
 
         # Get our gravity, if any
         self.gravity = opts["gravity"] if "gravity" in opts else "c"
@@ -731,7 +768,7 @@ class HttpResult(): ##########################################################
 
 
 # Base Dirpy Error class
-class DirpyError(Exception): ##################################################
+class DirpyError(Exception): #################################################
     def __init__(self, err_str, err_code=500):
         self.err_str = err_str
         self.err_code = err_code
@@ -741,17 +778,17 @@ class DirpyError(Exception): ##################################################
 
 
 # Dirpy Fatal Error class
-class DirpyFatalError(DirpyError): ############################################
+class DirpyFatalError(DirpyError): ###########################################
     pass    
 
 
 # Dirpy User Error class
-class DirpyUserError(DirpyError): #############################################
+class DirpyUserError(DirpyError): ############################################
     pass
 
 
 # Result returned by DirpyWorker
-class DirpyResult(): ##########################################################
+class DirpyResult(): #########################################################
 
     def __init__(self, http_code, err_msg=None, dirpy_obj=None):
         self.http_code  = http_code
@@ -760,7 +797,7 @@ class DirpyResult(): ##########################################################
 
 
 # Our HTTP Request handler class
-class HttpHandler(BaseHTTPServer.BaseHTTPRequestHandler): ####################
+class HttpHandler(http_server.BaseHTTPRequestHandler): #######################
 
     server_version = "Dirpy/" + __version__
     protocol_version = "HTTP/1.1"
@@ -785,7 +822,7 @@ class HttpHandler(BaseHTTPServer.BaseHTTPRequestHandler): ####################
     # Gracefully handle session failures
     def handle_one_request(self):
         try:
-            BaseHTTPServer.BaseHTTPRequestHandler.handle_one_request(self)
+            http_server.BaseHTTPRequestHandler.handle_one_request(self)
         except:
             pass
 
@@ -801,17 +838,17 @@ class HttpHandler(BaseHTTPServer.BaseHTTPRequestHandler): ####################
 
 
 # Our webserver class.  Implements timeouts
-class HttpTimeoutServer(BaseHTTPServer.HTTPServer): ##########################
+class HttpTimeoutServer(http_server.HTTPServer): ############################
 
     # Extend the HTTPServer constructor, so we can grab our timeout at init
     def __init__(self, server, handler, timeout=None):
         self.timeout = timeout
-        BaseHTTPServer.HTTPServer.__init__(self, server, handler)
+        http_server.HTTPServer.__init__(self, server, handler)
 
     # Bind our server and set our socket timeout before we accept connects
     def server_bind(self):
         try:
-            BaseHTTPServer.HTTPServer.server_bind(self)
+            http_server.HTTPServer.server_bind(self)
             self.socket.settimeout(self.timeout)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) 
@@ -837,9 +874,9 @@ class PostData:
 
 
 # The dirpy_worker wrapper function called when running in standalone mode
-def http_worker(req, method="GET"): ###########################################
+def http_worker(req, method="GET"): ##########################################
 
-    # Read request URI as defined by the BaseHTTPServer path
+    # Read request URI as defined by the http_server path
     req_uri_obj = urlparse.urlparse(req.path)
 
     # Read post data, if need be
@@ -890,7 +927,7 @@ def http_worker(req, method="GET"): ###########################################
 
 
 # The dirpy_worker wrapper function called when running in uwsgi mode
-def application(env, resp): ###################################################
+def application(env, resp): ##################################################
 
     # Read request URI from the UWSGI environment variable
     try:
@@ -975,11 +1012,17 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
         logger.warning(traceback.format_exc())
         return DirpyResult(503, "Uncaught Dirpy Error")
 
+
+    # Return 204/No CONTENT if the file is zero length.  This should
+    # only happen using the "noshow" option for the save command
+    if str(dirpy_obj.out_size) == "0":
+        return DirpyResult(204)
+
     return DirpyResult(200, None, dirpy_obj)
 
 
 # Read in the command line and file based configuration parameters
-def read_config(uwsgi_cfg=None): ##############################################
+def read_config(uwsgi_cfg=None): #############################################
 
     # Build our config parser
     parser = argparse.ArgumentParser(
@@ -1000,7 +1043,7 @@ def read_config(uwsgi_cfg=None): ##############################################
     # If a user-defined config file (i.e. uwsgi_cfg or cfg.config_file) is
     # defined but not exist, we should throw a fatal error
     cfg_file = uwsgi_cfg or cfg.config_file or "/etc/dirpy.conf"
-    cfg_parser = ConfigParser.RawConfigParser()
+    cfg_parser = configparser.RawConfigParser()
     try:
         if cfg_parser.read(cfg_file):
             cfg.defaults = False
@@ -1041,7 +1084,7 @@ def read_config(uwsgi_cfg=None): ##############################################
     cfg.allow_overwrite  = cfg_bool(cfg_parser,
         "global", "allow_overwrite", False, False)
     cfg.todisk_root  = cfg_str(cfg_parser,
-        "global", "todisk_root", False,  "")
+        "global", "todisk_root", False,  "/nonexistant")
     cfg.debug        = cfg_bool(cfg_parser,
         "global", "debug", False, cfg.debug)
 
@@ -1085,10 +1128,10 @@ def get_cmds(parsedPath, args): ##############################################
 
 
 # Grab an string from our config
-def cfg_str(cfg, section, name, required=True, default=None): #################
+def cfg_str(cfg, section, name, required=True, default=None): ################
     try:
         return cfg.get(section, name)
-    except ConfigParser.Error:
+    except configparser.Error:
         if not required:
             return default
         fatal("Missing required config parameter %s:%s." % (section, name))
@@ -1101,33 +1144,33 @@ def cfg_int(cfg, section, name, required=True, default=None): ################
         return cfg.getint(section, name)
     except ValueError:
         fatal("Config parameter %s:%s must be an integer." % (section, name))
-    except ConfigParser.Error:
+    except configparser.Error:
         if not required:
             return default
         fatal("Missing required config parameter %s:%s." % (section, name))
 
 
 # Grab an int from our config, complain if it isn't valid
-def cfg_bool(cfg, section, name, required=True, default=False): ################
+def cfg_bool(cfg, section, name, required=True, default=False): ##############
     try:
         # Allow a string if they match the default value
         return cfg.getboolean(section, name)
     except ValueError:
         fatal("Config parameter %s:%s must be a boolean." % (section, name))
-    except ConfigParser.Error:
+    except configparser.Error:
         if not required:
             return default
         fatal("Missing required config parameter %s:%s." % (section, name))
 
 
 # Grab an network address from our config, complain if it isn't valid
-def cfg_addr(cfg, section, name, required=True, default=None): ################
+def cfg_addr(cfg, section, name, required=True, default=None): ###############
     # Fetch and validate a hostname/ip address config option
     try:
         addr = cfg.get(section, name)
         socket.gethostbyname(addr)
         return addr
-    except ConfigParser.Error:
+    except configparser.Error:
         if not required:
             return default
         fatal("Missing required config parameter %s:%s." % (section, name))
@@ -1136,11 +1179,11 @@ def cfg_addr(cfg, section, name, required=True, default=None): ################
 
 
 # Make outgoing log messages printable and enforce a maximum line length
-class DirpyLogFilter(logging.Filter):
+class DirpyLogFilter(logging.Filter): ########################################
     def __init__(self, log_max_line):
         self.log_max_line = log_max_line
     def filter(self, rec):
-        rec.msg = rec.msg.encode('unicode_escape')
+        rec.msg = rec.msg.encode('utf_8').decode('unicode_escape')
         if len(rec.msg) > self.log_max_line:
             rec.msg = rec.msg[:self.log_max_line-3] + "..."
 
@@ -1148,7 +1191,7 @@ class DirpyLogFilter(logging.Filter):
         
 
 # Set up our global logger
-def logger_setup(): ###########################################################
+def logger_setup(): ##########################################################
 
     # Set our maximum severity level to log (i.e. debug or not)
     logLevel = logging.DEBUG if cfg.debug else logging.INFO
@@ -1188,7 +1231,7 @@ def fatal(msg): ##############################################################
     # If our logger isnt defined, print directly to stdout
     except:
         ts = datetime.datetime.now().strftime("%Y-%m-%d@%H:%M:%S")
-        print "[%s] CRITICAL: %s" % (ts, msg)
+        print("[%s] CRITICAL: %s" % (ts, msg))
     # Otherwise, just use the logger
     else:
         logger.critical(msg)
@@ -1205,7 +1248,7 @@ def daemonize(): #############################################################
     # Fork once
     try:
         pid = os.fork()
-    except OSError, e:
+    except OSError as e:
         fatal("Unable to fork: %s [%d]" % (e.strerror, e.errno))
 
     # In the first child process
@@ -1214,7 +1257,7 @@ def daemonize(): #############################################################
 
         try:
             pid = os.fork()
-        except OSError, e:
+        except OSError as e:
             fatal("Unable to fork: %s [%d]" % (e.strerror, e.errno))
 
         if (pid == 0):
@@ -1264,7 +1307,7 @@ def spawn_worker(target, args): ##############################################
 
 
 # The serve_forever wrapper, called by multiprocessing.Process
-def server_wrapper(server):
+def server_wrapper(server): ##################################################
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -1272,7 +1315,7 @@ def server_wrapper(server):
 
 
 # Our main loop, used in standalone mode
-if __name__ == "__main__":
+def dirpy_main(): ############################################################
 
     # Read command line parameters and config file
     read_config()
@@ -1328,7 +1371,7 @@ if __name__ == "__main__":
 
 
 # Handle being launched via UWSGI
-if sys.argv and sys.argv[0] == "uwsgi":
+def uwsgi_prep(): ###########################################################
 
     import uwsgi
 
