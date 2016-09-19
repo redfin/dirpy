@@ -12,7 +12,7 @@ except (IOError, ImportError):
 
 setup(
     name='dirpy',
-    version='0.5',
+    version='0.6',
 
     description='A dynamic image modification proxy',
     long_description=long_description,
