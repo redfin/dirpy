@@ -5,6 +5,7 @@ import cgi
 import datetime
 import errno
 import io
+import json
 import logging
 import multiprocessing
 import os
@@ -52,14 +53,19 @@ class DirpyImage: ############################################################
         self.gravity        = None
         self.im_in          = None
         self.in_fmt         = None
-        self.in_info        = {}
-        self.out_fmt        = None
+        self.in_size        = 0
         self.out_buf        = None
         self.out_size       = 0
+        self.out_x          = 0
+        self.out_y          = 0
+        self.in_x           = 0
+        self.in_y           = 0
+        self.out_fmt        = None
         self.save_opts      = {}
         self.trans          = None
         self.modified       = False
         self.http_root      = http_root
+        self.meta_data      = "{}"
 
     # Run a command, provided that it is value
     def run(self, cmd, opts):
@@ -98,6 +104,7 @@ class DirpyImage: ############################################################
                     self.logger.debug("Loading post data: %s" % str(opts))
                     file_obj = req_post_data
                     self.file_path = "POST_file"
+                    self.in_size = len(file_obj.getvalue())
                 else:
                     raise DirpyUserError("POST prohibited.")
 
@@ -111,6 +118,7 @@ class DirpyImage: ############################################################
                     headers={"User-Agent": "Dirpy/" + __version__})
                 proxy_res = urllib2.urlopen(proxy_req)
                 file_obj = io.BytesIO(proxy_res.read())
+                self.in_size = len(file_obj.getvalue())
 
             # Otherwise read it locally
             else:
@@ -118,6 +126,7 @@ class DirpyImage: ############################################################
                 self.logger.debug("Loading image %s: %s" % 
                     (self.file_path, str(opts)))
                 file_obj = open(self.file_path, "rb")
+                self.in_size = os.fstat(file_obj.fileno()).st_size
 
             self.logger.debug("Serving file: %s" % self.file_path)
         except Exception as e:
@@ -131,12 +140,11 @@ class DirpyImage: ############################################################
 
             # Record our input format and dimensions
             self.in_fmt = self.im_in.format.lower()
-            self.in_info = self.im_in.info
+            self.out_x, self.out_y = self.im_in.size
             self.in_x, self.in_y = self.im_in.size
-            self.orig_x, self.orig_y = self.im_in.size
 
             # Guard against decompression bombs
-            if cfg.max_pixels and self.in_x * self.in_y > cfg.max_pixels:
+            if cfg.max_pixels and self.out_x * self.out_y > cfg.max_pixels:
                 raise DirpyUserError("Image exceeds maximum pixel limit")
 
         except Exception as e:
@@ -207,44 +215,44 @@ class DirpyImage: ############################################################
         if pct:
             resize_ratio = float(pct)/100
         elif unlock:
-            resize_ratio = min(float(req_x)/self.in_x, 
-                float(req_y)/self.in_y)
+            resize_ratio = min(float(req_x)/self.out_x, 
+                float(req_y)/self.out_y)
             new_x, new_y = req_x, req_y
         elif landscape:
-            if self.in_x > self.in_y:
-                resize_ratio = max(float(req_x)/self.in_x,
-                    float(req_y)/self.in_y)
+            if self.out_x > self.out_y:
+                resize_ratio = max(float(req_x)/self.out_x,
+                    float(req_y)/self.out_y)
             else:
-                resize_ratio = min(float(req_x)/self.in_x,
-                    float(req_y)/self.in_y)
+                resize_ratio = min(float(req_x)/self.out_x,
+                    float(req_y)/self.out_y)
         elif portrait:
-            if self.in_x < self.in_y:
-                resize_ratio = max(float(req_x)/self.in_x,
-                    float(req_y)/self.in_y)
+            if self.out_x < self.out_y:
+                resize_ratio = max(float(req_x)/self.out_x,
+                    float(req_y)/self.out_y)
             else:
-                resize_ratio = min(float(req_x)/self.in_x,
-                    float(req_y)/self.in_y)
+                resize_ratio = min(float(req_x)/self.out_x,
+                    float(req_y)/self.out_y)
         else:
             if not req_y:
-                resize_ratio = float(req_x)/self.in_x
+                resize_ratio = float(req_x)/self.out_x
             elif not req_x:
-                resize_ratio = float(req_y)/self.in_y
+                resize_ratio = float(req_y)/self.out_y
             elif fill:
-                resize_ratio = max(float(req_x)/self.in_x, 
-                    float(req_y)/self.in_y)
+                resize_ratio = max(float(req_x)/self.out_x, 
+                    float(req_y)/self.out_y)
             else:
-                resize_ratio = min(float(req_x)/self.in_x, 
-                    float(req_y)/self.in_y)
+                resize_ratio = min(float(req_x)/self.out_x, 
+                    float(req_y)/self.out_y)
 
             # Evaluate our target dimensions to preserve aspect ratio
         if new_x is None:
-            new_x = int(self.in_x * resize_ratio)
+            new_x = int(self.out_x * resize_ratio)
         if new_y is None:
-            new_y = int(self.in_y * resize_ratio)
+            new_y = int(self.out_y * resize_ratio)
 
         self.logger.debug(
-            "Resize: in_x=%s in_y=%s new_x=%s new_y=%s ratio=%s" %
-            (self.in_x, self.in_y, new_x, new_y, resize_ratio))
+            "Resize: out_x=%s out_y=%s new_x=%s new_y=%s ratio=%s" %
+            (self.out_x, self.out_y, new_x, new_y, resize_ratio))
 
         # Now do the actual resize
         try:
@@ -255,7 +263,7 @@ class DirpyImage: ############################################################
                 self.im_in.draft(None,(new_x,new_y))
                 self.im_in = self.im_in.resize((new_x, new_y), filter_type)
                 self.modified = True
-            self.in_x, self.in_y = self.im_in.size
+            self.out_x, self.out_y = self.im_in.size
         except Exception as e:
             raise DirpyFatalError("Error resizing: %s" % e)
 
@@ -294,15 +302,15 @@ class DirpyImage: ############################################################
 
             # Make border cropping symmetric, if requested
             if "symmetric" in opts:
-                if new_dims[0] > self.in_x - new_dims[2]:
-                    new_dims[0] = self.in_x - new_dims[2]
-                elif new_dims[2] < self.in_x - new_dims[0]:
-                    new_dims[2] = self.in_x - new_dims[0]
+                if new_dims[0] > self.out_x - new_dims[2]:
+                    new_dims[0] = self.out_x - new_dims[2]
+                elif new_dims[2] < self.out_x - new_dims[0]:
+                    new_dims[2] = self.out_x - new_dims[0]
                 
-                if new_dims[1] > self.in_y - new_dims[3]:
-                    new_dims[1] = self.in_y - new_dims[3]
-                elif new_dims[3] < self.in_y - new_dims[1]:
-                    new_dims[3] = self.in_y - new_dims[1]
+                if new_dims[1] > self.out_y - new_dims[3]:
+                    new_dims[1] = self.out_y - new_dims[3]
+                elif new_dims[3] < self.out_y - new_dims[1]:
+                    new_dims[3] = self.out_y - new_dims[1]
                 
 
         # Handle gravity crop (i.e. a dimension-based crop)
@@ -312,15 +320,15 @@ class DirpyImage: ############################################################
             # from previous commands which may have shrank the image 
             # boundary below the specified dimensions
 
-            if self.req_dims[0] > self.in_x:
-                self.req_dims[0] = self.in_x
-            if self.req_dims[1] > self.in_y:
-                self.req_dims[1] = self.in_y
+            if self.req_dims[0] > self.out_x:
+                self.req_dims[0] = self.out_x
+            if self.req_dims[1] > self.out_y:
+                self.req_dims[1] = self.out_y
 
             # Don't bother cropping if our image is the same size as our
             # requested crop size
-            if (self.req_dims[1] == self.in_y 
-                    and self.req_dims[0] == self.in_x):
+            if (self.req_dims[1] == self.out_y 
+                    and self.req_dims[0] == self.out_x):
                 return
 
             new_dims = self._get_new_dims(opts)
@@ -344,8 +352,8 @@ class DirpyImage: ############################################################
                     str(self.req_dims))
 
             if (self.req_dims[0] < 0 or self.req_dims[1] < 0 or
-                    self.req_dims[2] > self.in_x or 
-                    self.req_dims[3] > self.in_y):
+                    self.req_dims[2] > self.out_x or 
+                    self.req_dims[3] > self.out_y):
                 raise DirpyUserError(
                     "Crop corners must be inside source image border: %s" %
                     str(self.req_dims))
@@ -356,14 +364,14 @@ class DirpyImage: ############################################################
         else:
             raise DirpyUserError("Crop requires dimensions or coordinates")
 
-        self.logger.debug("Crop: in_x=%s in_y=%s crop_box=%s, grav=%s" %
-            (self.in_x, self.in_y, str(new_dims), self.gravity))
+        self.logger.debug("Crop: out_x=%s out_y=%s crop_box=%s, grav=%s" %
+            (self.out_x, self.out_y, str(new_dims), self.gravity))
 
         # Now crop the image
         try:
             self.im_in = self.im_in.crop(new_dims)
             self.im_in.load()
-            self.in_x, self.in_y = self.im_in.size
+            self.out_x, self.out_y = self.im_in.size
             self.modified = True
         except Exception as e:
             raise DirpyFatalError("Error cropping: %s" % e)
@@ -381,11 +389,11 @@ class DirpyImage: ############################################################
             raise DirpyUserError("Pad requires no more than 2 dimensions")
 
         # Sanity check
-        if (self.req_dims[0] < self.in_x or 
-                self.req_dims[1] < self.in_y):
+        if (self.req_dims[0] < self.out_x or 
+                self.req_dims[1] < self.out_y):
             raise DirpyUserError(
                 "Pad area must be larger than source image: %s < [%s,%s]" %
-                (str(self.req_dims), self.in_x, self.in_y))
+                (str(self.req_dims), self.out_x, self.out_y))
 
         # Process transparency request
         if "trans" in opts:
@@ -434,7 +442,7 @@ class DirpyImage: ############################################################
                 im_pad.putalpha(im_mask)
 
             self.im_in = im_pad
-            self.in_x, self.in_y = self.im_in.size
+            self.out_x, self.out_y = self.im_in.size
             self.modified = True
         except Exception as e:
             raise DirpyFatalError(
@@ -472,7 +480,7 @@ class DirpyImage: ############################################################
         # Now rotate
         try:
             self.im_in = self.im_in.transpose(method)
-            self.in_x, self.in_y = self.im_in.size
+            self.out_x, self.out_y = self.im_in.size
             self.modified = True
         except Exception as e:
             raise DirpyFatalError(
@@ -533,9 +541,9 @@ class DirpyImage: ############################################################
                 raise Exception("Invalid quality")
 
             # Dont recompress input images that are less than this size
-            if self.in_x * self.in_y < cfg.min_recompress_pixels:
+            if self.out_x * self.out_y < cfg.min_recompress_pixels:
                 self.logger.debug("Not recompressing image: %s < %s" % 
-                    (self.in_x * self.in_y, 
+                    (self.out_x * self.out_y, 
                     cfg.min_recompress_pixels))
                 qual_val=95
 
@@ -580,8 +588,8 @@ class DirpyImage: ############################################################
             self.save_opts["format"] = self.out_fmt
             if progressive or optimize:
                 ImageFile.MAXBLOCK =  max(
-                    self.orig_x * self.orig_y, 
-                    self.in_x * self.in_y, 2097152)
+                    self.in_x * self.in_y, 
+                    self.out_x * self.out_y, 2097152)
                 self.logger.debug("MAXBLOCK set to: %s" % ImageFile.MAXBLOCK)
             if optimize: 
                 self.save_opts["optimize"] = True
@@ -639,15 +647,6 @@ class DirpyImage: ############################################################
                 except Exception as e:
                     raise DirpyFatalError("Can't save image to disk: %s" % e)
 
-            # If the user has requested "noshow", we don't want to return the
-            # image back to them (presumably because we have saved it to disk
-            # and that is all they care about, so we don't have to waste
-            # network overhead sending the image back to them)
-            if noshow:
-                logger.debug("Not showing %s, as requested" % self.file_path)
-                self.out_buf = io.BytesIO()
-                
-
             # Seek to the end of the buffer so we can get our content
             # size without allocating to a string (which we don't want
             # to do if this is a HEAD request).  Then seek back to the 
@@ -656,6 +655,25 @@ class DirpyImage: ############################################################
             self.out_size = self.out_buf.tell()
             self.out_buf.seek(0)
 
+            # If the user has requested "noshow", we don't want to return the
+            # image back to them (presumably because we have saved it to disk
+            # and that is all they care about, so we don't have to waste
+            # network overhead sending the image back to them)
+            if noshow:
+                logger.debug("Not showing %s, as requested" % self.file_path)
+                self.out_buf = io.BytesIO()
+
+            # Put together some image metadata in JSON format
+            self.meta_data = json.dumps({
+                "in_width"      : self.in_x,
+                "in_height"     : self.in_y,
+                "out_width"     : self.out_x,
+                "out_height"    : self.out_y,
+                "in_fmt"        : self.in_fmt,
+                "out_fmt"       : self.out_fmt,
+                "in_bytes"      : self.in_size,
+                "out_bytes"     : self.out_size
+            })
 
         except DirpyFatalError:
             raise
@@ -716,26 +734,26 @@ class DirpyImage: ############################################################
         new_dims = [None, None, None, None]
 
         # Account for requested dimensions with only a single value set
-        req_x = self.req_dims[0] or self.in_x
-        req_y = self.req_dims[1] or self.in_y
+        req_x = self.req_dims[0] or self.out_x
+        req_y = self.req_dims[1] or self.out_y
 
         # Now calculate dimensions based on gravity
         if "w" in self.gravity:
             new_dims[0] = 0
         elif "e" in self.gravity:
-            new_dims[0] = abs(self.in_x - req_x)
+            new_dims[0] = abs(self.out_x - req_x)
         else:
-            new_dims[0]  = abs(self.in_x - req_x)/2
+            new_dims[0]  = abs(self.out_x - req_x)/2
 
         if "n" in self.gravity:
             new_dims[1] = 0
         elif "s" in self.gravity:
-            new_dims[1] = abs(self.in_y - req_y)
+            new_dims[1] = abs(self.out_y - req_y)
         else:
-            new_dims[1]  = abs(self.in_y - req_y)/2
+            new_dims[1]  = abs(self.out_y - req_y)/2
 
-        new_dims[2] = new_dims[0] + min(req_x, self.in_x)
-        new_dims[3] = new_dims[1] + min(req_y, self.in_y)
+        new_dims[2] = new_dims[0] + min(req_x, self.out_x)
+        new_dims[3] = new_dims[1] + min(req_y, self.out_y)
 
         return new_dims
 
@@ -898,12 +916,14 @@ def http_worker(req, method="GET"): ##########################################
 
     # Throw an error if required
     if result.http_code == 204:
+        req.send_header("Dirpy-Data", result.dirpy_obj.meta_data)
         return req.send_response(204)
     elif result.err_msg is not None:
         return req.send_error(result.http_code, result.err_msg)
 
     # Now fire off a response to our client
     req.send_response(200)
+    req.send_header("Dirpy-Data", result.dirpy_obj.meta_data)
     req.send_header("Content-Type", "image/%s" % result.dirpy_obj.out_fmt)
     req.send_header("Content-Length", result.dirpy_obj.out_size)
     req.end_headers()
@@ -953,7 +973,10 @@ def application(env, resp): ##################################################
 
     # Throw an error if required
     if result.http_code == 204:
-        resp(http_res.resultTxt, [("Content-Type","text/html")])
+        resp(http_res.resultTxt, [
+            ("Dirpy-Data", result.dirpy_obj.meta_data),
+            ("Content-Type","text/html")
+        ])
         return ""
     elif result.err_msg is not None:
         resp(http_res.resultTxt, [("Content-Type","text/html")])
@@ -961,6 +984,7 @@ def application(env, resp): ##################################################
 
     # Now fire off a response to our client
     resp("200 OK", [
+        ("Dirpy-Data", result.dirpy_obj.meta_data),
         ("Content-Type", "image/%s" % result.dirpy_obj.out_fmt),
         ("Content-Length", str(result.dirpy_obj.out_size)) ]
     )
