@@ -4,15 +4,18 @@ from os import path
 
 here = path.abspath(path.dirname(__file__))
 
-try:
-    import pypandoc
-    long_description = pypandoc.convert('README.md', 'rst')
-except (IOError, ImportError):
-    long_description = open('README.md').read()
+if path.isfile('README.md'):
+    try:
+        import pypandoc
+        long_description = pypandoc.convert('README.md', 'rst')
+    except (IOError, ImportError):
+        long_description = open('README.md').read()
+else:
+    long_description=""
 
 setup(
     name='dirpy',
-    version='0.6',
+    version='0.8',
 
     description='A dynamic image modification proxy',
     long_description=long_description,

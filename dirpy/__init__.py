@@ -1,4 +1,4 @@
-__version__ = "0.6"
+__version__ = "0.8"
 
 import argparse
 import cgi
