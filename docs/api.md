@@ -22,8 +22,8 @@ the URL format used by Dirpy is:
 The path in this case should point to the source file that is being modified 
 (either on the local disk of the machine hosting the Dirpy daemon, or on a 
 remote server when proxying).  Here we can see that commands "cmd1", "cmd2" 
-and "cmd3" are being run.  "cmd1" has two options specified: "opt1" has a value 
-of "val1", and "opt2" has a value of "true", as it has no value defined.
+and "cmd3" are being run.  "cmd1" has two options specified: "opt1" has a 
+value of "val1", and "opt2" has a value of "true", as it has no value defined.
 
 The most important thing to note when constructing Dirpy URLs is that Dirpy 
 commands, with the exception of the "load" and "save" commands, are 
@@ -242,4 +242,13 @@ with the todisk option to front-load data for later consumption. Note
 that this option will cause Dirpy to return a 204 (No Content) HTTP
 response on a successful resize, instead of the typical 200.
 
+### status
+
+If the status command is specified (without any arguments), then all other
+commands are ignored and the server immediately returns a "204: no content"
+reponse.  This is useful for enabling monitoring scripts and the like
+to programatically determine if the Dirpy daemon is running, by querying
+an URL like:
+
+  http://127.0.0.1:3000?status
 

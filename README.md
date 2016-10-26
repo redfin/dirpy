@@ -28,6 +28,7 @@ A few of Dirpy's more interesting capabilities include:
   * Saving output images to disk (useful when acting as a LRU image cache)
   * JPEG ICC profile support
   * Running in a standalone configuration or via UWSGI
+  * Ability to report statistics to a StatsD daemon
   
 A full list of Dirpy's commands and their options is available in the 
 [Dirpy API Guide](https://github.com/redfin/dirpy/blob/master/docs/api.md).

@@ -15,7 +15,7 @@ else:
 
 setup(
     name='dirpy',
-    version='0.8',
+    version='0.9',
 
     description='A dynamic image modification proxy',
     long_description=long_description,

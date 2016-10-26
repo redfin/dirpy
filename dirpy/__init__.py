@@ -1,7 +1,8 @@
-__version__ = "0.8"
+__version__ = "0.9"
 
 import argparse
 import cgi
+import collections
 import datetime
 import errno
 import io
@@ -65,7 +66,11 @@ class DirpyImage: ############################################################
         self.trans          = None
         self.modified       = False
         self.http_root      = http_root
-        self.meta_data      = "{}"
+        self.meta_data      = collections.defaultdict(dict)
+        self.http_code      = 200
+        self.http_msg       = "OK"
+
+        self.init_time      = time.time()
 
     # Run a command, provided that it is value
     def run(self, cmd, opts):
@@ -81,6 +86,9 @@ class DirpyImage: ############################################################
 
     # Load an image file, either from disk or a local HTTP(S) server
     def load(self, opts, rel_file, req_post_data): ###########################
+
+        # Measure the time it takes to load our file
+        load_start = time.time()
 
         # A file-like object to store the result of our BytesIO
         # output (in the event of a proxied result) or the contents
@@ -130,8 +138,8 @@ class DirpyImage: ############################################################
 
             self.logger.debug("Serving file: %s" % self.file_path)
         except Exception as e:
-            err_code = e.code if hasattr(e, "code") else 404
-            raise DirpyUserError("Error reading file: %s" % e, err_code)
+            err_code = e.code if hasattr(e, "code") else 500
+            raise DirpyFatalError("Error reading file: %s" % e, err_code)
 
 
         # Read in the image from the file object
@@ -142,6 +150,13 @@ class DirpyImage: ############################################################
             self.in_fmt = self.im_in.format.lower()
             self.out_x, self.out_y = self.im_in.size
             self.in_x, self.in_y = self.im_in.size
+
+            self.meta_data["g"]["in_width"]      = self.in_x
+            self.meta_data["g"]["in_height"]     = self.in_y
+            self.meta_data["g"]["in_bytes"]      = self.in_size
+            self.meta_data["ms"]["load_time"]    = time.time() - load_start
+
+            self.meta_data["c"]["in_fmt_" + self.in_fmt] = 1
 
             # Guard against decompression bombs
             if cfg.max_pixels and self.out_x * self.out_y > cfg.max_pixels:
@@ -156,6 +171,9 @@ class DirpyImage: ############################################################
 
         self.logger.debug(
             "Resizing image %s: %s" % (self.file_path, str(opts)))
+
+        # Measure time spent resizing
+        resize_start = time.time()
 
         # Fetch our percentage resize value (if any)
         try:
@@ -244,7 +262,7 @@ class DirpyImage: ############################################################
                 resize_ratio = min(float(req_x)/self.out_x, 
                     float(req_y)/self.out_y)
 
-            # Evaluate our target dimensions to preserve aspect ratio
+        # Evaluate our target dimensions to preserve aspect ratio
         if new_x is None:
             new_x = int(self.out_x * resize_ratio)
         if new_y is None:
@@ -266,6 +284,12 @@ class DirpyImage: ############################################################
             self.out_x, self.out_y = self.im_in.size
         except Exception as e:
             raise DirpyFatalError("Error resizing: %s" % e)
+
+        # Record resize time
+        if "resize_time" in self.meta_data:
+            self.meta_data["ms"]["resize_time"] += time.time() - resize_start
+        else:
+            self.meta_data["ms"]["resize_time"] = time.time() - resize_start
 
 
     # Crop an image
@@ -448,6 +472,7 @@ class DirpyImage: ############################################################
             raise DirpyFatalError(
                 "Error padding image %s: %s" % (self.file_path,e))
 
+
     # Transpose an image
     def transpose(self, opts): ###############################################
 
@@ -487,11 +512,13 @@ class DirpyImage: ############################################################
                 "Error transposing image %s: %s" % (self.file_path,e))
 
 
-
     # Write an image to a BytesIO output buffer
     def save(self, opts): ####################################################
 
         self.logger.debug("Saving image %s: %s" % (self.file_path, str(opts)))
+
+        # Measure time spent saving
+        save_start = time.time()
 
         # Handle save options
         noicc       = "noicc" in opts
@@ -664,16 +691,12 @@ class DirpyImage: ############################################################
                 self.out_buf = io.BytesIO()
 
             # Put together some image metadata in JSON format
-            self.meta_data = json.dumps({
-                "in_width"      : self.in_x,
-                "in_height"     : self.in_y,
-                "out_width"     : self.out_x,
-                "out_height"    : self.out_y,
-                "in_fmt"        : self.in_fmt,
-                "out_fmt"       : self.out_fmt,
-                "in_bytes"      : self.in_size,
-                "out_bytes"     : self.out_size
-            })
+            self.meta_data["g"]["out_width"]     = self.out_x
+            self.meta_data["g"]["out_height"]    = self.out_y
+            self.meta_data["g"]["out_bytes"]     = self.out_size
+            self.meta_data["ms"]["save_time"]    = time.time() - save_start
+
+            self.meta_data["c"]["out_fmt_" + self.out_fmt] = 1
 
         except DirpyFatalError:
             raise
@@ -758,6 +781,56 @@ class DirpyImage: ############################################################
         return new_dims
 
 
+    # Return perf data; this should be called after all other Dirpy
+    # operations have been completed (although there is nothing stopping
+    # you from calling it earlier).  We also send data to statsd here,
+    # if applicable, since this seems like the best place to do it
+    def yield_meta_data(self):
+        self.meta_data["ms"]["total_time"] = time.time() - self.init_time
+
+        # Convert all timings from fractional seconds to integer milliseconds
+        self.meta_data["ms"] = { 
+            k: int(v*1000) for k, v in self.meta_data["ms"].items() 
+        }
+
+        # Send to statsd if our statsd server has been configured
+        if cfg.statsd_server is not None:
+            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            addr = (cfg.statsd_server, cfg.statsd_port)
+            # Generate a list of our metrics with their statsd prefixes
+            # attached.  Convert our fractional-second timing measurements
+            # to milliseconds while we are at it
+            pfx = cfg.statsd_prefix
+            metrics = [ "%s.%s:%s|%s\n" % (pfx, name, val, met_type)
+                for met_type, metrics in self.meta_data.items()
+                for name, val in metrics.items()
+            ]
+
+            while metrics:
+                buf = metrics.pop()
+                while metrics and len(buf) + len(metrics[-1]) < 512:
+                    buf += metrics.pop()
+
+                try:
+                    logger.debug(buf.rstrip().encode('utf-8'))
+                    logger.debug(":".join(map(str,addr)))
+                    udp_sock.sendto(buf.rstrip().encode('utf-8'), addr)
+                except Exception as e:
+                    logger.debug("Failed to send to statsd: %s", e)
+                    
+        return json.dumps( 
+            {x: y for i, j in self.meta_data.items() for x, y in j.items()}
+        )
+
+
+    # Our HTTP-specific result
+    def result(self, http_code, http_msg=None):
+        self.http_code = http_code
+        self.http_msg  = http_msg
+
+        return self
+
+
 # HTTP Result code w/ matching string
 class HttpResult(): ##########################################################
     codes = {
@@ -803,15 +876,6 @@ class DirpyFatalError(DirpyError): ###########################################
 # Dirpy User Error class
 class DirpyUserError(DirpyError): ############################################
     pass
-
-
-# Result returned by DirpyWorker
-class DirpyResult(): #########################################################
-
-    def __init__(self, http_code, err_msg=None, dirpy_obj=None):
-        self.http_code  = http_code
-        self.err_msg    = err_msg
-        self.dirpy_obj  = dirpy_obj
 
 
 # Our HTTP Request handler class
@@ -890,7 +954,6 @@ class PostData:
         self.file_name = self.form['file'].filename
             
 
-
 # The dirpy_worker wrapper function called when running in standalone mode
 def http_worker(req, method="GET"): ##########################################
 
@@ -914,18 +977,20 @@ def http_worker(req, method="GET"): ##########################################
     # Call the dirpy worker
     result = dirpy_worker(req_uri_obj, req_post_data)
 
-    # Throw an error if required
+    # Handle 204/no-content responses
     if result.http_code == 204:
-        req.send_header("Dirpy-Data", result.dirpy_obj.meta_data)
-        return req.send_response(204)
-    elif result.err_msg is not None:
-        return req.send_error(result.http_code, result.err_msg)
+        req.send_response(204)
+        req.send_header("Dirpy-Data", result.yield_meta_data())
+        return
+    # Throw an error if required
+    elif result.http_msg is not None:
+        return req.send_error(result.http_code, result.http_msg)
 
     # Now fire off a response to our client
     req.send_response(200)
-    req.send_header("Dirpy-Data", result.dirpy_obj.meta_data)
-    req.send_header("Content-Type", "image/%s" % result.dirpy_obj.out_fmt)
-    req.send_header("Content-Length", result.dirpy_obj.out_size)
+    req.send_header("Dirpy-Data", result.yield_meta_data())
+    req.send_header("Content-Type", "image/%s" % result.out_fmt)
+    req.send_header("Content-Length", result.out_size)
     req.end_headers()
 
     # Don't send actual data if this is a HEAD request
@@ -936,7 +1001,7 @@ def http_worker(req, method="GET"): ##########################################
     # by wrapping the output buffer read/write loop in a try block
     try:
         while True:
-            buf = result.dirpy_obj.out_buf.read(4096)
+            buf = result.out_buf.read(4096)
             if not buf:
                 break
             req.wfile.write(buf)
@@ -971,26 +1036,28 @@ def application(env, resp): ##################################################
     result = dirpy_worker(req_uri_obj, req_post_data)
     http_res = HttpResult(result.http_code)
 
-    # Throw an error if required
+    # Handle 204/no-content responses
     if result.http_code == 204:
         resp(http_res.resultTxt, [
-            ("Dirpy-Data", result.dirpy_obj.meta_data),
+            ("Dirpy-Data", result.yield_meta_data()),
             ("Content-Type","text/html")
         ])
         return ""
-    elif result.err_msg is not None:
+
+    # Handle any errors
+    elif result.http_msg is not None:
         resp(http_res.resultTxt, [("Content-Type","text/html")])
-        return result.err_msg
+        return result.http_msg
 
     # Now fire off a response to our client
     resp("200 OK", [
-        ("Dirpy-Data", result.dirpy_obj.meta_data),
-        ("Content-Type", "image/%s" % result.dirpy_obj.out_fmt),
-        ("Content-Length", str(result.dirpy_obj.out_size)) ]
+        ("Dirpy-Data", result.yield_meta_data()),
+        ("Content-Type", "image/%s" % result.out_fmt),
+        ("Content-Length", str(result.out_size)) ]
     )
 
-    if result.dirpy_obj.out_buf is not None:
-        return result.dirpy_obj.out_buf.read()
+    if result.out_buf is not None:
+        return result.out_buf.read()
 
     return ""
     
@@ -1001,9 +1068,12 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
     # Extract relative file path from request URI object
     file_path = req_uri_obj.path
 
+    # Instatiate our dirpy image object
+    dirpy_obj = DirpyImage(cfg.http_root)
+
     # Ignore favicons
     if file_path == "/favicon.ico":
-        return DirpyResult(204)
+        return dirpy_obj.result(204)
 
     # Non-positional arguments
     args = { "load": {}, "save": {} }
@@ -1011,8 +1081,9 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
     # Positional-based commands
     cmds = get_cmds(req_uri_obj, args)
 
-    # Instatiate our dirpy image object
-    dirpy_obj = DirpyImage(cfg.http_root)
+    # Check for a status request, ignore everything else if we get one
+    if ["status", {}] in cmds:
+        return dirpy_obj.result(204)
 
     # Catch dirpy-related errors
     try:
@@ -1028,21 +1099,21 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
 
     except DirpyFatalError as e:
         logger.warning(str(e))
-        return DirpyResult(e.err_code, "Fatal Dirpy Error")
+        return dirpy_obj.result(e.err_code, "Fatal Dirpy Error")
     except DirpyUserError as e:
         logger.debug(str(e))
-        return DirpyResult(e.err_code, e.err_str)
+        return dirpy_obj.result(e.err_code, e.err_str)
     except Exception as e:
         logger.warning(traceback.format_exc())
-        return DirpyResult(503, "Uncaught Dirpy Error")
+        return dirpy_obj.result(503, "Uncaught Dirpy Error")
 
 
     # Return 204/No CONTENT if the file is zero length.  This should
     # only happen using the "noshow" option for the save command
     if str(dirpy_obj.out_size) == "0":
-        return DirpyResult(204)
+        return dirpy_obj.result(204)
 
-    return DirpyResult(200, None, dirpy_obj)
+    return dirpy_obj.result(200, None)
 
 
 # Read in the command line and file based configuration parameters
@@ -1077,39 +1148,45 @@ def read_config(uwsgi_cfg=None): #############################################
         fatal("Unable to load config file '%s': %s" % (cfg_file, e))
 
     # Read in all of our global / default options
-    cfg.pid_file     = cfg_str(cfg_parser,
+    cfg.pid_file                = cfg_str(cfg_parser,
         "global", "pid_file", False, "/var/run/dirpy.pid")
-    cfg.log_file     = cfg_str(cfg_parser,
+    cfg.log_file                = cfg_str(cfg_parser,
         "global", "log_file", False, "/var/log/dirpy.log")
-    cfg.log_max_line = cfg_int(cfg_parser,
+    cfg.log_max_line            = cfg_int(cfg_parser,
         "global", "log_max_line", False, 300)
-    cfg.bind_addr    = cfg_str(cfg_parser,
+    cfg.bind_addr               = cfg_str(cfg_parser,
         "global", "bind_addr", False,  "0.0.0.0")
-    cfg.bind_port    = cfg_int(cfg_parser,
+    cfg.bind_port               = cfg_int(cfg_parser,
         "global", "bind_port", False,  3000)
-    cfg.http_root    = cfg_str(cfg_parser,
+    cfg.http_root               = cfg_str(cfg_parser,
         "global", "http_root", False,  "/var/www/html")
-    cfg.num_workers  = cfg_int(cfg_parser,
+    cfg.num_workers             = cfg_int(cfg_parser,
         "global", "num_workers", False,  multiprocessing.cpu_count()*2)
-    cfg.max_pixels   = cfg_int(cfg_parser,
+    cfg.max_pixels              = cfg_int(cfg_parser,
         "global", "max_pixels", False,  90000000)
-    cfg.def_quality  = cfg_int(cfg_parser,
+    cfg.def_quality             = cfg_int(cfg_parser,
         "global", "def_quality", False,  95)
-    cfg.min_recompress_pixels  = cfg_int(cfg_parser,
+    cfg.min_recompress_pixels   = cfg_int(cfg_parser,
         "global", "min_recompress_pixels", False,  0)
-    cfg.req_timeout  = cfg_int(cfg_parser,
+    cfg.req_timeout             = cfg_int(cfg_parser,
         "global", "req_timeout", False, None)
-    cfg.allow_post   = cfg_bool(cfg_parser,
+    cfg.allow_post              = cfg_bool(cfg_parser,
         "global", "allow_post", False,  False)
-    cfg.allow_todisk  = cfg_bool(cfg_parser,
+    cfg.allow_todisk            = cfg_bool(cfg_parser,
         "global", "allow_todisk", False, False)
-    cfg.allow_mkdir  = cfg_bool(cfg_parser,
+    cfg.allow_mkdir             = cfg_bool(cfg_parser,
         "global", "allow_mkdir", False, False)
-    cfg.allow_overwrite  = cfg_bool(cfg_parser,
+    cfg.allow_overwrite         = cfg_bool(cfg_parser,
         "global", "allow_overwrite", False, False)
-    cfg.todisk_root  = cfg_str(cfg_parser,
+    cfg.todisk_root             = cfg_str(cfg_parser,
         "global", "todisk_root", False,  "/nonexistant")
-    cfg.debug        = cfg_bool(cfg_parser,
+    cfg.statsd_server           = cfg_str(cfg_parser,
+        "global", "statsd_server", False, None)
+    cfg.statsd_port             = cfg_int(cfg_parser,
+        "global", "statsd_port", False, 8125)
+    cfg.statsd_prefix           = cfg_str(cfg_parser,
+        "global", "statsd_prefix", False, "dirpy")
+    cfg.debug                   = cfg_bool(cfg_parser,
         "global", "debug", False, cfg.debug)
 
 
