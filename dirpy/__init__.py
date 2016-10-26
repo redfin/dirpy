@@ -1,4 +1,4 @@
-__version__ = "0.9"
+__version__ = "1.0"
 
 import argparse
 import cgi
@@ -812,8 +812,6 @@ class DirpyImage: ############################################################
                     buf += metrics.pop()
 
                 try:
-                    logger.debug(buf.rstrip().encode('utf-8'))
-                    logger.debug(":".join(map(str,addr)))
                     udp_sock.sendto(buf.rstrip().encode('utf-8'), addr)
                 except Exception as e:
                     logger.debug("Failed to send to statsd: %s", e)
@@ -990,7 +988,7 @@ def http_worker(req, method="GET"): ##########################################
     req.send_response(200)
     req.send_header("Dirpy-Data", result.yield_meta_data())
     req.send_header("Content-Type", "image/%s" % result.out_fmt)
-    req.send_header("Content-Length", result.out_size)
+    req.send_header("Content-Length", str(result.out_size))
     req.end_headers()
 
     # Don't send actual data if this is a HEAD request
