@@ -1,4 +1,4 @@
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 import argparse
 import cgi
@@ -1114,8 +1114,9 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
         return dirpy_obj.result(204)
 
     # If our memcached client exists, try to fetch from it first
+    # Don't use memcached on POST requests, though
     memcached_key = "%s-%s" % (cfg.memcached_prefix, query_path)
-    if memcached_client:
+    if memcached_client and not req_post_data:
         try:
             cache_start = time.time()
             result = memcached_client.get(memcached_key)
@@ -1169,7 +1170,7 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
         return dirpy_obj.result(204)
 
     # Write to memcached if it exists
-    if memcached_client:
+    if memcached_client and not req_post_data:
         logger.debug("Writing result to memcached")
         cache_start = time.time()
         try:

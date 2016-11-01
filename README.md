@@ -204,3 +204,5 @@ install prior to being able to use this function:
     pip install pymemcache
 
 Enabling memcached support in Dirpy is trivial; see the config for details.
+Note, however, that POST requests won't be served from (or written to) the
+memcached server.
