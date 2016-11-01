@@ -1,4 +1,4 @@
-__version__ = "1.1"
+__version__ = "1.2.1"
 
 import argparse
 import cgi
@@ -1117,11 +1117,23 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
     memcached_key = "%s-%s" % (cfg.memcached_prefix, query_path)
     if memcached_client:
         try:
+            cache_start = time.time()
             result = memcached_client.get(memcached_key)
             if result is not None:
                 logger.debug("Serving request via memcached")
                 dirpy_obj.deserialize(result)
                 dirpy_obj.meta_data["c"]["cache_hit"] = 1
+
+                # Remove timing parameters to prevent cache
+                # hits from skewing render time graphs
+                if "ms" in dirpy_obj.meta_data:
+                    dirpy_obj.meta_data["ms"].pop("load_time", None)
+                    dirpy_obj.meta_data["ms"].pop("save_time", None)
+                    dirpy_obj.meta_data["ms"].pop("resize_time", None)
+
+                # Now set the time taken to serve a cached request
+                dirpy_obj.meta_data["ms"]["cache_read_time"] = (time.time()
+                    - cache_start)
 
                 return dirpy_obj.result(200, None)
             else:
@@ -1158,13 +1170,18 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
 
     # Write to memcached if it exists
     if memcached_client:
-        import pickle
         logger.debug("Writing result to memcached")
+        cache_start = time.time()
         try:
             memcached_client.set(memcached_key, dirpy_obj.serialize(), 
                 noreply=True)
+            dirpy_obj.meta_data["c"]["cache_write"] = 1
+
         except Exception as e:
             logger.debug("Failed to write to memcached: %s" % e)
+
+        dirpy_obj.meta_data["ms"]["cache_write_time"] = (time.time()
+            - cache_start)
 
     return dirpy_obj.result(200, None)
 
@@ -1405,9 +1422,9 @@ def memcached_setup(): ########################################################
 
     if cfg.memcached_hosts:
         try:
-            import pymemcached.client
+            import pymemcache.client
         except:
-            fatal("Memcache support requires the pymemcached python module.")
+            fatal("Memcache support requires the pymemcache python module.")
 
         logger.debug("Connecting to memcached host(s): %s" % cfg.memcached_hosts)
 
@@ -1432,11 +1449,11 @@ def memcached_setup(): ########################################################
         # a single memcached instance or a memcached cluster
         try:
             if len(hosts) > 1:
-                memcached_client = pymemcached.client.hash.HashClient(hosts,
+                memcached_client = pymemcache.client.hash.HashClient(hosts,
                     serializer=pickle_serializer,
                     deserializer=pickle_deserializer)
             else:
-                memcached_client = pymemcached.client.base.Client(hosts[0],
+                memcached_client = pymemcache.client.base.Client(hosts[0],
                     serializer=pickle_serializer,
                     deserializer=pickle_deserializer)
         except Exception as e:
