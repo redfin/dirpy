@@ -1,4 +1,4 @@
-__version__ = "1.0"
+__version__ = "1.1"
 
 import argparse
 import cgi
@@ -30,6 +30,12 @@ else:
     import urllib2
     import urlparse
 
+# Load pickle for memcached serialization
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
+
 # Gracefully exit if PIL is missing
 try:
     from PIL import Image, ImageFile, ImageColor, ImageChops, ImageDraw
@@ -55,7 +61,7 @@ class DirpyImage: ############################################################
         self.im_in          = None
         self.in_fmt         = None
         self.in_size        = 0
-        self.out_buf        = None
+        self.out_buf        = io.BytesIO()
         self.out_size       = 0
         self.out_x          = 0
         self.out_y          = 0
@@ -157,6 +163,9 @@ class DirpyImage: ############################################################
             self.meta_data["ms"]["load_time"]    = time.time() - load_start
 
             self.meta_data["c"]["in_fmt_" + self.in_fmt] = 1
+
+            self.meta_data["c"]["total"]         = 1
+            self.meta_data["c"]["cache_hit"]     = 0
 
             # Guard against decompression bombs
             if cfg.max_pixels and self.out_x * self.out_y > cfg.max_pixels:
@@ -602,10 +611,6 @@ class DirpyImage: ############################################################
 
         # Now write the converted image to a buffer
         try:
-            # set up our bytesIO object, since PIL refuses to write
-            # directly to a string
-            self.out_buf = io.BytesIO()
-
             # Our output arguments.  We have to to use a kwargs pointer, as
             # the save function will sometimes interpret the presence of
             # an argument (regardless of its value) to mean a true value
@@ -820,6 +825,25 @@ class DirpyImage: ############################################################
             {x: y for i, j in self.meta_data.items() for x, y in j.items()}
         )
 
+    # Allow serialization of a specific subset of object values
+    def serialize(self):
+        serialized = pickle.dumps(
+            [
+                self.meta_data,
+                self.out_fmt,
+                self.out_size,
+                self.out_buf.read(),
+            ]
+        )
+        self.out_buf.seek(0)
+
+        return serialized
+
+    def deserialize(self, blob):
+        deserialized = pickle.loads(blob)
+        self.meta_data, self.out_fmt, self.out_size  = deserialized[:3]
+        self.out_buf.write(deserialized[3])
+        self.out_buf.seek(0)
 
     # Our HTTP-specific result
     def result(self, http_code, http_msg=None):
@@ -924,6 +948,9 @@ class HttpTimeoutServer(http_server.HTTPServer): ############################
     def __init__(self, server, handler, timeout=None):
         self.timeout = timeout
         http_server.HTTPServer.__init__(self, server, handler)
+
+        # Set up our memcached connection here, for lack of a better place
+        memcached_setup()
 
     # Bind our server and set our socket timeout before we accept connects
     def server_bind(self):
@@ -1048,9 +1075,10 @@ def application(env, resp): ##################################################
         return result.http_msg
 
     # Now fire off a response to our client
+    logger.debug("out_size: %s" % result.out_size)
     resp("200 OK", [
-        ("Dirpy-Data", result.yield_meta_data()),
-        ("Content-Type", "image/%s" % result.out_fmt),
+        ("Dirpy-Data", str(result.yield_meta_data())),
+        ("Content-Type", "image/%s" % str(result.out_fmt)),
         ("Content-Length", str(result.out_size)) ]
     )
 
@@ -1063,8 +1091,9 @@ def application(env, resp): ##################################################
 # Our dirpy function.  This is where all the heavy lifting is done
 def dirpy_worker(req_uri_obj, req_post_data): ################################
 
-    # Extract relative file path from request URI object
+    # Extract relative file path and full query path from request URI object
     file_path = req_uri_obj.path
+    query_path = "%s/%s" % (req_uri_obj.path, req_uri_obj.query)
 
     # Instatiate our dirpy image object
     dirpy_obj = DirpyImage(cfg.http_root)
@@ -1078,10 +1107,27 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
 
     # Positional-based commands
     cmds = get_cmds(req_uri_obj, args)
+    logger.debug("Got request: %s" % cmds)
 
     # Check for a status request, ignore everything else if we get one
-    if ["status", {}] in cmds:
+    if any(cmd[0] == "status" for cmd in cmds):
         return dirpy_obj.result(204)
+
+    # If our memcached client exists, try to fetch from it first
+    memcached_key = "%s-%s" % (cfg.memcached_prefix, query_path)
+    if memcached_client:
+        try:
+            result = memcached_client.get(memcached_key)
+            if result is not None:
+                logger.debug("Serving request via memcached")
+                dirpy_obj.deserialize(result)
+                dirpy_obj.meta_data["c"]["cache_hit"] = 1
+
+                return dirpy_obj.result(200, None)
+            else:
+                logger.debug("Cache miss; serving file normally")
+        except Exception as e:
+            logger.debug("Failed to read from memcached: %s" % e)
 
     # Catch dirpy-related errors
     try:
@@ -1105,11 +1151,20 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
         logger.warning(traceback.format_exc())
         return dirpy_obj.result(503, "Uncaught Dirpy Error")
 
-
     # Return 204/No CONTENT if the file is zero length.  This should
     # only happen using the "noshow" option for the save command
     if str(dirpy_obj.out_size) == "0":
         return dirpy_obj.result(204)
+
+    # Write to memcached if it exists
+    if memcached_client:
+        import pickle
+        logger.debug("Writing result to memcached")
+        try:
+            memcached_client.set(memcached_key, dirpy_obj.serialize(), 
+                noreply=True)
+        except Exception as e:
+            logger.debug("Failed to write to memcached: %s" % e)
 
     return dirpy_obj.result(200, None)
 
@@ -1183,7 +1238,11 @@ def read_config(uwsgi_cfg=None): #############################################
     cfg.statsd_port             = cfg_int(cfg_parser,
         "global", "statsd_port", False, 8125)
     cfg.statsd_prefix           = cfg_str(cfg_parser,
-        "global", "statsd_prefix", False, "dirpy")
+         "global", "statsd_prefix", False, "dirpy")
+    cfg.memcached_hosts          = cfg_str(cfg_parser,
+        "global", "memcached_hosts", False, None)
+    cfg.memcached_prefix         = cfg_str(cfg_parser,
+        "global", "memcached_prefix", False, "dirpy")
     cfg.debug                   = cfg_bool(cfg_parser,
         "global", "debug", False, cfg.debug)
 
@@ -1320,6 +1379,68 @@ def logger_setup(): ##########################################################
     if cfg.defaults:
         logger.info("Can't read config file %s; using default values" %
             cfg.config_file)
+
+
+# Our pymemcached serializer using pickle
+def pickle_serializer(key, value): ##########################################
+    if type(value) == str:
+        return value, 1
+    return pickle.dumps(value), 2
+    
+
+# Our pymemcached deserializer using pickle
+def pickle_deserializer(key, value, flags): #################################
+    if flags == 1:
+        return value
+    if flags == 2:
+        return pickle.loads(value)
+    raise Exception("Unknown serialization format")
+
+
+# Set up memcached, if requested by user
+def memcached_setup(): ########################################################
+
+    global memcached_client
+    memcached_client = None
+
+    if cfg.memcached_hosts:
+        try:
+            import pymemcached.client
+        except:
+            fatal("Memcache support requires the pymemcached python module.")
+
+        logger.debug("Connecting to memcached host(s): %s" % cfg.memcached_hosts)
+
+        # Split our comma-delimited string of colon-delimited host/port pairs
+        # into a list of host/port tuples
+        hosts = []
+        for host in [x.rstrip() for x in cfg.memcached_hosts.split(",")]:
+            if host == "": continue
+
+            if ":" in host:
+                host, port = host.split(":")
+                try:
+                    port = int(port)
+                except:
+                    fatal("Ports must be integers: %s" % (memcached_hosts))
+            else:
+                port = 11211
+
+            hosts.append((host, port))
+
+        # Depending on how many hosts have been specified, set up either
+        # a single memcached instance or a memcached cluster
+        try:
+            if len(hosts) > 1:
+                memcached_client = pymemcached.client.hash.HashClient(hosts,
+                    serializer=pickle_serializer,
+                    deserializer=pickle_deserializer)
+            else:
+                memcached_client = pymemcached.client.base.Client(hosts[0],
+                    serializer=pickle_serializer,
+                    deserializer=pickle_deserializer)
+        except Exception as e:
+            fatal("Error connecting to memcached backend: %s" % e)
 
 
 # Throw a fatal message and exit
@@ -1482,4 +1603,7 @@ def uwsgi_prep(): ###########################################################
 
     # Set up our logger
     logger_setup()
+
+    # Set up our memcached client (if any)
+    memcached_setup()
 

@@ -15,7 +15,7 @@ else:
 
 setup(
     name='dirpy',
-    version='1.0',
+    version='1.1',
 
     description='A dynamic image modification proxy',
     long_description=long_description,
@@ -44,7 +44,6 @@ setup(
     keywords='sprite generator',
 
     packages=find_packages(exclude=['contrib', 'docs', 'tests']),
-    install_requires=['Pillow'],
 
     scripts=['bin/dirpy'],
 )

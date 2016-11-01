@@ -196,3 +196,11 @@ uninstall Pillow and install Pillow-SIMD in its place:
 
     pip uninstall Pillow
     pip install Pillow-SIMD
+
+Dirpy also supports caching results in a memcached backend or memcached 
+cluster via the `pymemcache` Python module, which you will need to 
+install prior to being able to use this function:
+
+    pip install pymemcache
+
+Enabling memcached support in Dirpy is trivial; see the config for details.
