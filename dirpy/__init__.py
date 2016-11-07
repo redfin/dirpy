@@ -1,10 +1,11 @@
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 import argparse
 import cgi
 import collections
 import datetime
 import errno
+import hashlib
 import io
 import json
 import logging
@@ -24,17 +25,18 @@ if sys.version[0] == '3':
     import http.server as http_server
     import urllib.request as urllib2
     import urllib.parse as urlparse
+    import pickle
 else:
     import ConfigParser as configparser
     import BaseHTTPServer as http_server
     import urllib2
     import urlparse
 
-# Load pickle for memcached serialization
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+    # Load pickle for cache serialization
+    try:
+        import cPickle as pickle
+    except ImportError:
+        import pickle
 
 # Gracefully exit if PIL is missing
 try:
@@ -295,10 +297,10 @@ class DirpyImage: ############################################################
             raise DirpyFatalError("Error resizing: %s" % e)
 
         # Record resize time
-        if "resize_time" in self.meta_data:
-            self.meta_data["ms"]["resize_time"] += time.time() - resize_start
+        if "time_resize" in self.meta_data:
+            self.meta_data["ms"]["time_resize"] += time.time() - resize_start
         else:
-            self.meta_data["ms"]["resize_time"] = time.time() - resize_start
+            self.meta_data["ms"]["time_resize"] = time.time() - resize_start
 
 
     # Crop an image
@@ -699,7 +701,7 @@ class DirpyImage: ############################################################
             self.meta_data["g"]["out_width"]     = self.out_x
             self.meta_data["g"]["out_height"]    = self.out_y
             self.meta_data["g"]["out_bytes"]     = self.out_size
-            self.meta_data["ms"]["save_time"]    = time.time() - save_start
+            self.meta_data["ms"]["time_save"]    = time.time() - save_start
 
             self.meta_data["c"]["out_fmt_" + self.out_fmt] = 1
 
@@ -791,7 +793,7 @@ class DirpyImage: ############################################################
     # you from calling it earlier).  We also send data to statsd here,
     # if applicable, since this seems like the best place to do it
     def yield_meta_data(self):
-        self.meta_data["ms"]["total_time"] = time.time() - self.init_time
+        self.meta_data["ms"]["time_total"] = time.time() - self.init_time
 
         # Convert all timings from fractional seconds to integer milliseconds
         self.meta_data["ms"] = { 
@@ -806,7 +808,8 @@ class DirpyImage: ############################################################
             # attached.  Convert our fractional-second timing measurements
             # to milliseconds while we are at it
             pfx = cfg.statsd_prefix
-            metrics = [ "%s.%s:%s|%s\n" % (pfx, name, val, met_type)
+            metrics = [ "%s.%s:%s|%s\n" % (
+                    pfx, name.replace('_', '.', 1), val, met_type)
                 for met_type, metrics in self.meta_data.items()
                 for name, val in metrics.items()
             ]
@@ -825,24 +828,24 @@ class DirpyImage: ############################################################
             {x: y for i, j in self.meta_data.items() for x, y in j.items()}
         )
 
-    # Allow serialization of a specific subset of object values
+    # Serialize a specific subset of object values
     def serialize(self):
-        serialized = pickle.dumps(
-            [
-                self.meta_data,
-                self.out_fmt,
-                self.out_size,
-                self.out_buf.read(),
-            ]
-        )
+        serialized = {
+            "meta_data":    pickle.dumps(self.meta_data),
+            "out_fmt":      self.out_fmt,
+            "out_size":     self.out_size,
+            "out_buf":      self.out_buf.read()
+        }
         self.out_buf.seek(0)
 
         return serialized
 
-    def deserialize(self, blob):
-        deserialized = pickle.loads(blob)
-        self.meta_data, self.out_fmt, self.out_size  = deserialized[:3]
-        self.out_buf.write(deserialized[3])
+    # Deserialize a specific subset of object values
+    def deserialize(self, redis_data):
+        self.meta_data = pickle.loads(redis_data["meta_data"])
+        self.out_fmt = redis_data["out_fmt"]
+        self.out_size = redis_data["out_size"]
+        self.out_buf.write(redis_data["out_buf"])
         self.out_buf.seek(0)
 
     # Our HTTP-specific result
@@ -949,8 +952,8 @@ class HttpTimeoutServer(http_server.HTTPServer): ############################
         self.timeout = timeout
         http_server.HTTPServer.__init__(self, server, handler)
 
-        # Set up our memcached connection here, for lack of a better place
-        memcached_setup()
+        # Set up our caching connection here, for lack of a better place
+        cache_setup()
 
     # Bind our server and set our socket timeout before we accept connects
     def server_bind(self):
@@ -1009,7 +1012,9 @@ def http_worker(req, method="GET"): ##########################################
         return
     # Throw an error if required
     elif result.http_msg is not None:
-        return req.send_error(result.http_code, result.http_msg)
+        req.send_error(result.http_code, result.http_msg)
+        req.send_header("Dirpy-Data", result.yield_meta_data())
+        return
 
     # Now fire off a response to our client
     req.send_response(200)
@@ -1071,7 +1076,10 @@ def application(env, resp): ##################################################
 
     # Handle any errors
     elif result.http_msg is not None:
-        resp(http_res.resultTxt, [("Content-Type","text/html")])
+        resp(http_res.resultTxt, [
+            ("Dirpy-Data", result.yield_meta_data()),
+            ("Content-Type","text/html")
+        ])
         return result.http_msg
 
     # Now fire off a response to our client
@@ -1113,34 +1121,31 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
     if any(cmd[0] == "status" for cmd in cmds):
         return dirpy_obj.result(204)
 
-    # If our memcached client exists, try to fetch from it first
-    # Don't use memcached on POST requests, though
-    memcached_key = "%s-%s" % (cfg.memcached_prefix, query_path)
-    if memcached_client and not req_post_data:
+    # If our cache client exists, try to fetch from it first
+    # Don't use cache on POST requests, though
+    if redis_client and not req_post_data:
+        cache_key = hashlib.sha1(cfg.redis_prefix + query_path).digest()
         try:
             cache_start = time.time()
-            result = memcached_client.get(memcached_key)
-            if result is not None:
-                logger.debug("Serving request via memcached")
+            result = redis_client.hgetall(cache_key)
+            if result:
+                logger.debug("Serving request via redis")
                 dirpy_obj.deserialize(result)
                 dirpy_obj.meta_data["c"]["cache_hit"] = 1
 
                 # Remove timing parameters to prevent cache
-                # hits from skewing render time graphs
-                if "ms" in dirpy_obj.meta_data:
-                    dirpy_obj.meta_data["ms"].pop("load_time", None)
-                    dirpy_obj.meta_data["ms"].pop("save_time", None)
-                    dirpy_obj.meta_data["ms"].pop("resize_time", None)
+                # hits from skewing timing graphs
+                dirpy_obj.meta_data.pop("ms", None)
 
                 # Now set the time taken to serve a cached request
-                dirpy_obj.meta_data["ms"]["cache_read_time"] = (time.time()
+                dirpy_obj.meta_data["ms"]["time_cache_read"] = (time.time()
                     - cache_start)
 
                 return dirpy_obj.result(200, None)
             else:
                 logger.debug("Cache miss; serving file normally")
         except Exception as e:
-            logger.debug("Failed to read from memcached: %s" % e)
+            logger.debug("Failed to read from redis: %s" % e)
 
     # Catch dirpy-related errors
     try:
@@ -1169,19 +1174,18 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
     if str(dirpy_obj.out_size) == "0":
         return dirpy_obj.result(204)
 
-    # Write to memcached if it exists
-    if memcached_client and not req_post_data:
-        logger.debug("Writing result to memcached")
+    # Write to our redis client, if it exists
+    if redis_client and not req_post_data:
+        logger.debug("Writing result to redis")
         cache_start = time.time()
         try:
-            memcached_client.set(memcached_key, dirpy_obj.serialize(), 
-                noreply=True)
+            redis_client.hmset(cache_key, dirpy_obj.serialize())
             dirpy_obj.meta_data["c"]["cache_write"] = 1
 
         except Exception as e:
-            logger.debug("Failed to write to memcached: %s" % e)
+            logger.debug("Failed to write to redis: %s" % e)
 
-        dirpy_obj.meta_data["ms"]["cache_write_time"] = (time.time()
+        dirpy_obj.meta_data["ms"]["time_cache_write"] = (time.time()
             - cache_start)
 
     return dirpy_obj.result(200, None)
@@ -1256,11 +1260,11 @@ def read_config(uwsgi_cfg=None): #############################################
     cfg.statsd_port             = cfg_int(cfg_parser,
         "global", "statsd_port", False, 8125)
     cfg.statsd_prefix           = cfg_str(cfg_parser,
-         "global", "statsd_prefix", False, "dirpy")
-    cfg.memcached_hosts          = cfg_str(cfg_parser,
-        "global", "memcached_hosts", False, None)
-    cfg.memcached_prefix         = cfg_str(cfg_parser,
-        "global", "memcached_prefix", False, "dirpy")
+        "global", "statsd_prefix", False, "dirpy")
+    cfg.redis_host             = cfg_str(cfg_parser,
+        "global", "redis_host", False, None)
+    cfg.redis_prefix         = cfg_str(cfg_parser,
+        "global", "redis_prefix", False, "dirpy")
     cfg.debug                   = cfg_bool(cfg_parser,
         "global", "debug", False, cfg.debug)
 
@@ -1399,66 +1403,36 @@ def logger_setup(): ##########################################################
             cfg.config_file)
 
 
-# Our pymemcached serializer using pickle
-def pickle_serializer(key, value): ##########################################
-    if type(value) == str:
-        return value, 1
-    return pickle.dumps(value), 2
-    
+# Set up caching layer, if requested by user
+def redis_setup(): ###########################################################
 
-# Our pymemcached deserializer using pickle
-def pickle_deserializer(key, value, flags): #################################
-    if flags == 1:
-        return value
-    if flags == 2:
-        return pickle.loads(value)
-    raise Exception("Unknown serialization format")
+    global redis_client
+    redis_client = None
 
-
-# Set up memcached, if requested by user
-def memcached_setup(): ########################################################
-
-    global memcached_client
-    memcached_client = None
-
-    if cfg.memcached_hosts:
+    if cfg.redis_host:
         try:
-            import pymemcache.client
+            import redis
         except:
-            fatal("Memcache support requires the pymemcache python module.")
+            fatal("Redis support requires the 'redis' python module.")
 
-        logger.debug("Connecting to memcached host(s): %s" % cfg.memcached_hosts)
+        logger.debug("Connecting to redis host: %s" % cfg.redis_host)
 
         # Split our comma-delimited string of colon-delimited host/port pairs
         # into a list of host/port tuples
-        hosts = []
-        for host in [x.rstrip() for x in cfg.memcached_hosts.split(",")]:
-            if host == "": continue
+        if ":" in cfg.redis_host:
+            host, port = cfg.redis_host.split(":")
+            try:
+                port = int(port)
+            except:
+                fatal("Redis port must be an integer: %s" % (redis_host))
+        else:
+            host = cfg.redis_host
+            port = 6379
 
-            if ":" in host:
-                host, port = host.split(":")
-                try:
-                    port = int(port)
-                except:
-                    fatal("Ports must be integers: %s" % (memcached_hosts))
-            else:
-                port = 11211
-
-            hosts.append((host, port))
-
-        # Depending on how many hosts have been specified, set up either
-        # a single memcached instance or a memcached cluster
         try:
-            if len(hosts) > 1:
-                memcached_client = pymemcache.client.hash.HashClient(hosts,
-                    serializer=pickle_serializer,
-                    deserializer=pickle_deserializer)
-            else:
-                memcached_client = pymemcache.client.base.Client(hosts[0],
-                    serializer=pickle_serializer,
-                    deserializer=pickle_deserializer)
+            redis_client = redis.StrictRedis(host=host, port=port)
         except Exception as e:
-            fatal("Error connecting to memcached backend: %s" % e)
+            fatal("Error connecting to redis backend: %s" % e)
 
 
 # Throw a fatal message and exit
@@ -1622,6 +1596,10 @@ def uwsgi_prep(): ###########################################################
     # Set up our logger
     logger_setup()
 
-    # Set up our memcached client (if any)
-    memcached_setup()
+    # Let the world know that we have started
+    logger.info("Dirpy v%s uWSGI worker started! Herp da dirp!"
+            % __version__)
+
+    # Set up our cache client (if any)
+    redis_setup()
 
