@@ -29,6 +29,7 @@ A few of Dirpy's more interesting capabilities include:
   * JPEG ICC profile support
   * Running in a standalone configuration or via UWSGI
   * Ability to report statistics to a StatsD daemon
+  * Caching of results in a redis backend
   
 A full list of Dirpy's commands and their options is available in the 
 [Dirpy API Guide](https://github.com/redfin/dirpy/blob/master/docs/api.md).
@@ -197,12 +198,12 @@ uninstall Pillow and install Pillow-SIMD in its place:
     pip uninstall Pillow
     pip install Pillow-SIMD
 
-Dirpy also supports caching results in a memcached backend or memcached 
-cluster via the `pymemcache` Python module, which you will need to 
-install prior to being able to use this function:
+Dirpy also supports caching results in a redis backend or redis cluster via 
+the `redis` Python module, which you will need to install prior to being 
+able to use this function:
 
-    pip install pymemcache
+    pip install redis
 
-Enabling memcached support in Dirpy is trivial; see the config for details.
+Enabling redis support in Dirpy is trivial; see the config for details.
 Note, however, that POST requests won't be served from (or written to) the
-memcached server.
+redis server.
