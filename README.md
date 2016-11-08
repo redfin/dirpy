@@ -29,7 +29,7 @@ A few of Dirpy's more interesting capabilities include:
   * JPEG ICC profile support
   * Running in a standalone configuration or via UWSGI
   * Ability to report statistics to a StatsD daemon
-  * Caching of results in a redis backend
+  * Caching of results in a redis backend or redis cluster
   
 A full list of Dirpy's commands and their options is available in the 
 [Dirpy API Guide](https://github.com/redfin/dirpy/blob/master/docs/api.md).

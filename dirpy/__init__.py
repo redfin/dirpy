@@ -1,4 +1,4 @@
-__version__ = "1.2.3"
+__version__ = "1.3.0"
 
 import argparse
 import cgi
@@ -953,7 +953,7 @@ class HttpTimeoutServer(http_server.HTTPServer): ############################
         http_server.HTTPServer.__init__(self, server, handler)
 
         # Set up our caching connection here, for lack of a better place
-        cache_setup()
+        redis_setup()
 
     # Bind our server and set our socket timeout before we accept connects
     def server_bind(self):
@@ -1124,7 +1124,8 @@ def dirpy_worker(req_uri_obj, req_post_data): ################################
     # If our cache client exists, try to fetch from it first
     # Don't use cache on POST requests, though
     if redis_client and not req_post_data:
-        cache_key = hashlib.sha1(cfg.redis_prefix + query_path).digest()
+        cache_key = hashlib.sha1(cfg.redis_prefix + query_path).hexdigest()
+        logger.debug("Looking for cache key %s" % cache_key)
         try:
             cache_start = time.time()
             result = redis_client.hgetall(cache_key)
@@ -1261,9 +1262,11 @@ def read_config(uwsgi_cfg=None): #############################################
         "global", "statsd_port", False, 8125)
     cfg.statsd_prefix           = cfg_str(cfg_parser,
         "global", "statsd_prefix", False, "dirpy")
-    cfg.redis_host             = cfg_str(cfg_parser,
-        "global", "redis_host", False, None)
-    cfg.redis_prefix         = cfg_str(cfg_parser,
+    cfg.redis_hosts             = cfg_str(cfg_parser,
+        "global", "redis_hosts", False, None)
+    cfg.redis_cluster           = cfg_bool(cfg_parser,
+        "global", "redis_cluster", False, False)
+    cfg.redis_prefix            = cfg_str(cfg_parser,
         "global", "redis_prefix", False, "dirpy")
     cfg.debug                   = cfg_bool(cfg_parser,
         "global", "debug", False, cfg.debug)
@@ -1403,31 +1406,60 @@ def logger_setup(): ##########################################################
             cfg.config_file)
 
 
+# Extract a host/port pair from a redis host declaration
+def redis_host_port(host_port):
+    if ":" in host_port:
+        host, port = host_port.split(":")
+        try:
+            port = int(port)
+        except:
+            fatal("Redis port must be an integer: %s" % (host_port))
+    else:
+        host = host_port
+        port = 6379
+
+    return host, str(port)
+
 # Set up caching layer, if requested by user
 def redis_setup(): ###########################################################
 
     global redis_client
     redis_client = None
 
-    if cfg.redis_host:
+    if not cfg.redis_hosts: return
+
+    if cfg.redis_cluster:
+        try:
+            import rediscluster
+        except:
+            fatal("Redis cluster support requires the "
+                "'redis-py-cluster' python module.")
+
+        logger.debug("Connecting to redis cluster using: %s" % cfg.redis_hosts)
+
+        startup_nodes = []
+        for host_port in [x.strip() for x in cfg.redis_hosts.split(',')]:
+            host, port = redis_host_port(host_port)
+            startup_nodes.append({"host": host, "port": port})
+
+        try:
+            redis_client = rediscluster.StrictRedisCluster(
+                startup_nodes=startup_nodes, decode_responses=False)
+        except Exception as e:
+            fatal("Error connecting to redis cluster: %s" % e)
+
+    else:
         try:
             import redis
         except:
             fatal("Redis support requires the 'redis' python module.")
 
-        logger.debug("Connecting to redis host: %s" % cfg.redis_host)
+        logger.debug("Connecting to redis host: %s" % cfg.redis_hosts)
 
-        # Split our comma-delimited string of colon-delimited host/port pairs
-        # into a list of host/port tuples
-        if ":" in cfg.redis_host:
-            host, port = cfg.redis_host.split(":")
-            try:
-                port = int(port)
-            except:
-                fatal("Redis port must be an integer: %s" % (redis_host))
-        else:
-            host = cfg.redis_host
-            port = 6379
+        if "," in cfg.redis_hosts:
+            fatal("Multiple redis hosts not permitted in non-cluster mode")
+
+        host, port = redis_host_port(cfg.redis_hosts)
 
         try:
             redis_client = redis.StrictRedis(host=host, port=port)
