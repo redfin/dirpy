@@ -681,14 +681,6 @@ class DirpyImage: ############################################################
                 except Exception as e:
                     raise DirpyFatalError("Can't save image to disk: %s" % e)
 
-            # Seek to the end of the buffer so we can get our content
-            # size without allocating to a string (which we don't want
-            # to do if this is a HEAD request).  Then seek back to the 
-            # beginning so we can read the string later
-            self.out_buf.seek(0,os.SEEK_END)
-            self.out_size = self.out_buf.tell()
-            self.out_buf.seek(0)
-
             # If the user has requested "noshow", we don't want to return the
             # image back to them (presumably because we have saved it to disk
             # and that is all they care about, so we don't have to waste
@@ -696,6 +688,14 @@ class DirpyImage: ############################################################
             if noshow:
                 logger.debug("Not showing %s, as requested" % self.file_path)
                 self.out_buf = io.BytesIO()
+
+            # Seek to the end of the buffer so we can get our content
+            # size without allocating to a string (which we don't want
+            # to do if this is a HEAD request).  Then seek back to the 
+            # beginning so we can read the string later
+            self.out_buf.seek(0,os.SEEK_END)
+            self.out_size = self.out_buf.tell()
+            self.out_buf.seek(0)
 
             # Put together some image metadata in JSON format
             self.meta_data["g"]["out_width"]     = self.out_x
@@ -1009,11 +1009,13 @@ def http_worker(req, method="GET"): ##########################################
     if result.http_code == 204:
         req.send_response(204)
         req.send_header("Dirpy-Data", result.yield_meta_data())
+        req.end_headers()
         return
     # Throw an error if required
     elif result.http_msg is not None:
         req.send_error(result.http_code, result.http_msg)
         req.send_header("Dirpy-Data", result.yield_meta_data())
+        req.end_headers()
         return
 
     # Now fire off a response to our client
